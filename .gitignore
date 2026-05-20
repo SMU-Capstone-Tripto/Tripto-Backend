@@ -1,8 +1,30 @@
-.idea
-*.db
+# 파이썬 가상환경
+.venv/
+venv/
+
+# 파이썬 캐시 파일
+__pycache__/
 *.pyc
-__pycache__
+*.pyo
+*.pyd
+
+# 에디터 및 IDE 설정
+.idea/
+.vscode/
+*.swp
+
+# OS 환경 파일
+.DS_Store
+Thumbs.db
+
+# 환경 변수 및 비밀번호 보안 파일
+.env
+*.db
+
+# 로그 파일
+logs/
+*.log
+
+# DB 마이그레이션 관리
 migrations
 alembic.ini
-.env
-logs
