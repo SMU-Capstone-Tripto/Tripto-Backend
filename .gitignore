@@ -18,7 +18,7 @@ __pycache__/
 Thumbs.db
 
 # 환경 변수 및 비밀번호 보안 파일
-.env
+.env*
 *.db
 
 # 로그 파일
