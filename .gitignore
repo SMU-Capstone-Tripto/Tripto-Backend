@@ -28,3 +28,7 @@ logs/
 # DB 마이그레이션 관리
 migrations
 alembic.ini
+
+#docker
+docker-compose.yml
+Dockerfile
