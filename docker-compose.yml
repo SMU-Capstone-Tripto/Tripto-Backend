@@ -3,7 +3,7 @@ version: "3.9"
 services:
   db:
     image: postgres:16-alpine
-    container_name: tripto_db
+    container_name: postgres
     environment:
         POSTGRES_USER: ${POSTGRES_USER}
         POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -20,7 +20,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: tripto_redis
+    container_name: redis
     ports:
       - "6379:6379"
     volumes:
@@ -32,8 +32,8 @@ services:
       retries: 5
 
   api:
-    build: .
-    container_name: tripto_api
+    image: benzenebenzene/smu-tripto:latest
+    container_name: tripto
     env_file:
       - .env
     ports:
@@ -43,11 +43,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - .:/app
     command: >
       sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 volumes:
   postgres_data:
