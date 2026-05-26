@@ -51,7 +51,9 @@ class User(Base):
     is_email_verified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-
+    status_message = Column(String(100), nullable=True)
+    profile_image_url = Column(String(512), nullable=True)
+    avatar_color = Column(String(7), nullable=True)
     # 관계
     sent_friend_requests = relationship(
         "Friendship",
