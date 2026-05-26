@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 4. 전체 코드 복사
-COPY app ./app
+COPY . .
 
 # 5. 컨테이너가 열 포트 설정
 EXPOSE 8000
