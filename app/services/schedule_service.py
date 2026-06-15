@@ -1,8 +1,11 @@
 from typing import List, Optional
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload
+from sqlalchemy.future import select
 
 from app.models.schedule_model import Schedule
 from app.schemas.schedule_schema import ScheduleCreate, ScheduleUpdate
@@ -18,11 +21,13 @@ async def create_schedule(db: AsyncSession, data: ScheduleCreate) -> Schedule:
 
 
 async def get_schedule(db: AsyncSession, schedule_id: int) -> Optional[Schedule]:
-    result = await db.execute(
+    stmt = (
         select(Schedule)
+        .options(joinedload(Schedule.travel))
         .where(Schedule.schedule_id == schedule_id)
         .options(selectinload(Schedule.memos))
     )
+    result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 
@@ -36,11 +41,13 @@ async def get_schedules_by_travel(db: AsyncSession, travel_id: int) -> List[Sche
 
 
 async def update_schedule(
-    db: AsyncSession, schedule_id: int, data: ScheduleUpdate
+    db: AsyncSession, schedule_id: int, data: ScheduleUpdate, owner_id: int
 ) -> Optional[Schedule]:
     schedule = await get_schedule(db, schedule_id)
     if not schedule:
         return None
+    if schedule.travel.owner_id != owner_id:
+        raise HTTPException(status_code=403, detail="자신의 여행/일정만 수정할 수 있습니다.")
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(schedule, field, value)
     await db.flush()
@@ -48,10 +55,12 @@ async def update_schedule(
     return schedule
 
 
-async def delete_schedule(db: AsyncSession, schedule_id: int) -> bool:
+async def delete_schedule(db: AsyncSession, schedule_id: int, owner_id: int) -> bool:
     schedule = await get_schedule(db, schedule_id)
     if not schedule:
         return False
+    if schedule.travel.owner_id != owner_id:
+        raise HTTPException(status_code=403, detail="자신의 여행/일정만 수정할 수 있습니다.")
     await db.delete(schedule)
     await db.flush()
     return True

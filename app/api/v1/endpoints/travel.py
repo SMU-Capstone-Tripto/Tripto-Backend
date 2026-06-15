@@ -43,16 +43,21 @@ async def update_travel(
     travel_id: int,
     data: TravelUpdate,
     db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user), 
 ):
-    travel = await travel_service.update_travel(db, travel_id, data)
+    travel = await travel_service.update_travel(db, travel_id, data, current_user.user_id)
     if not travel:
         raise HTTPException(status_code=404, detail="여행을 찾을 수 없습니다.")
     return travel
 
 
 @router.delete("/{travel_id}", status_code=204, summary="여행 삭제")
-async def delete_travel(travel_id: int, db: AsyncSession = Depends(get_async_db)):
-    deleted = await travel_service.delete_travel(db, travel_id)
+async def delete_travel(
+    travel_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    deleted = await travel_service.delete_travel(db, travel_id, current_user.user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="여행을 찾을 수 없습니다.")
 
