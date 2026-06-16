@@ -4,7 +4,7 @@ from fastapi import HTTPException, status
 import httpx
 
 from app.models.user_model import User, AuthProvider
-from app.schemas.auth_schema import RegisterRequest, LoginRequest
+from app.schemas.auth_schema import RegisterRequest, LoginRequest, PasswordChangeRequest
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token
 from app.core.unique_id import generate_unique_id
 from app.core.config import settings
@@ -216,3 +216,30 @@ async def google_login(code: str, db: AsyncSession) -> dict:
         "refresh_token": create_refresh_token(token_data),
         "token_type": "bearer",
     }
+
+async def change_user_password(
+    db: AsyncSession,
+    current_user: User,
+    data: PasswordChangeRequest
+) -> None:
+    # 소셜 로그인 유저는 자체 비밀번호가 없으므로 차단
+    if current_user.auth_provider != AuthProvider.LOCAL or not current_user.hashed_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="소셜 로그인 계정은 비밀번호를 변경할 수 없습니다."
+        )
+    # 현재 비밀번호 검증
+    if not verify_password(data.old_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="현재 비밀번호가 올바르지 않습니다."
+        )
+    # 새 비밀번호와 기존 비밀번호 비교 
+    if data.old_password == data.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="기존 비밀번호와 다른 비밀번호를 사용해주세요."
+        )
+    # 새 비밀번호 해싱 및 저장
+    current_user.hashed_password = hash_password(data.new_password)
+    await db.flush()
