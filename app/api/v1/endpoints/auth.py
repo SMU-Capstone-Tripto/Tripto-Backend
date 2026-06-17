@@ -23,8 +23,9 @@ from app.schemas.auth_schema import (
     EmailVerifyConfirm,
     UserResponse,
     UserUpdateRequest,
+    PasswordChangeRequest,
 )
-from app.services.auth_service import register_user, login_user, kakao_login, google_login
+from app.services.auth_service import register_user, login_user, kakao_login, google_login, change_user_password
 from app.services.email_service import (
     generate_verification_code,
     send_verification_email,
@@ -152,7 +153,6 @@ async def kakao_oauth_start():
     )
     return RedirectResponse(url)
 
-
 @router.get("/kakao/callback", response_model=TokenResponse, summary="카카오 OAuth 콜백")
 async def kakao_callback(code: str, db: AsyncSession = Depends(get_async_db)):
     tokens = await kakao_login(code, db)
@@ -172,8 +172,18 @@ async def google_oauth_start():
     )
     return RedirectResponse(url)
 
-
 @router.get("/google/callback", response_model=TokenResponse, summary="구글 OAuth 콜백")
 async def google_callback(code: str, db: AsyncSession = Depends(get_async_db)):
     tokens = await google_login(code, db)
     return TokenResponse(**tokens)
+
+
+# ── 비밀번호 변경 ────────────────────────────────────────
+@router.patch("/password", summary="비밀번호 변경")
+async def change_password(
+    body: PasswordChangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    await change_user_password(db, current_user, body)
+    return {"message": "비밀번호 변경이 완료되었습니다."}
