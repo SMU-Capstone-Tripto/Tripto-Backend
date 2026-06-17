@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_async_db
 from app.schemas.schedule_schema import ScheduleCreate, ScheduleUpdate, ScheduleSummaryResponse, ScheduleDetailResponse, ScheduleMapPin
 from app.services import schedule_service
+from app.models.user_model import User
+from app.core.dependencies import get_current_user
 
 router = APIRouter(prefix="/schedules", tags=["스케줄"])
 
@@ -30,16 +32,21 @@ async def update_schedule(
     schedule_id: int,
     data: ScheduleUpdate,
     db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
 ):
-    schedule = await schedule_service.update_schedule(db, schedule_id, data)
+    schedule = await schedule_service.update_schedule(db, schedule_id, data, current_user.user_id)
     if not schedule:
         raise HTTPException(status_code=404, detail="일정을 찾을 수 없습니다.")
     return schedule
 
 
 @router.delete("/{schedule_id}", status_code=204, summary="스케줄 삭제")
-async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_async_db)):
-    deleted = await schedule_service.delete_schedule(db, schedule_id)
+async def delete_schedule(
+    schedule_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    deleted = await schedule_service.delete_schedule(db, schedule_id, current_user.user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="일정을 찾을 수 없습니다.")
 

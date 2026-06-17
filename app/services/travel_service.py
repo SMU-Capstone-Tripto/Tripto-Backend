@@ -1,5 +1,6 @@
 from typing import List, Optional
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -33,11 +34,13 @@ async def get_travels_by_owner(db: AsyncSession, owner_id: int) -> List[Travel]:
 
 
 async def update_travel(
-    db: AsyncSession, travel_id: int, data: TravelUpdate
+    db: AsyncSession, travel_id: int, data: TravelUpdate, owner_id: int
 ) -> Optional[Travel]:
     travel = await get_travel(db, travel_id)
     if not travel:
         return None
+    if travel.owner_id != owner_id:
+        raise HTTPException(status_code=403, detail="자신의 여행/일정만 수정할 수 있습니다.")
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(travel, field, value)
     await db.flush()
@@ -45,10 +48,12 @@ async def update_travel(
     return travel
 
 
-async def delete_travel(db: AsyncSession, travel_id: int) -> bool:
+async def delete_travel(db: AsyncSession, travel_id: int, owner_id: int) -> bool:
     travel = await get_travel(db, travel_id)
     if not travel:
         return False
+    if travel.owner_id != owner_id:
+        raise HTTPException(status_code=403, detail="자신의 여행/일정만 수정할 수 있습니다.")
     await db.delete(travel)
     await db.flush()
     return True
