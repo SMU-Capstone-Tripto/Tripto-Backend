@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, field_validator, Field
 from typing import Optional, List
 from datetime import datetime
 from app.models.user_model import AuthProvider
@@ -92,9 +92,11 @@ class UserUpdateRequest(BaseModel):
     nickname: Optional[str] = None
     tags: Optional[List[str]] = None
 
+# 비밀번호 변경(로그인 환경에서) 
 class PasswordChangeRequest(BaseModel):
     old_password: str
     new_password: str
+    verification_code: str
 
     @field_validator("new_password")
     @classmethod
@@ -107,3 +109,9 @@ class PasswordChangeRequest(BaseModel):
                 "새 비밀번호는 영문 대소문자, 숫자, 특수문자(@$!%*?&)를 포함하여 최소 8자 이상이어야 합니다."
             )
         return v
+
+# 비밀번호 변경(비로그인 환경에서) 
+class PasswordResetRequest(BaseModel):
+    email: EmailStr = Field(..., description="계정 이메일 주소")
+    verification_code: str = Field(..., description="6자리 인증 코드")
+    new_password: str = Field(..., min_length=8, description="변경할 비밀번호 (영문 대소문자 + 특수문자 혼합 8자 이상)")
