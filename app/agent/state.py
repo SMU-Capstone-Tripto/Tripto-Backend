@@ -18,9 +18,13 @@ class TravelState(InputState):
     budget: Optional[int]           # 예산 범위
     preferences: List[str]          # 선호도 (예: ["자연", "맛집", "쇼핑"])
     must_visit: Optional[List[str]] # 사용자가 꼭 가고 싶다고 강조한 장소
-    current_step: Annotated[str, lambda old, new: new]  # 현재 대화 단계 (예: "planning", "booking", "completed")
+    current_step: Annotated[str, lambda old, new: new]  # 현재 대화 단계
+
     plan_title: Optional[str]               # Optimizer가 생성한 여행 제목
     itinerary: List[str]                    # 확정된 일정 리스트 (일자별)
+    
+    itinerary_feedback: Optional[str]       # "1일차 카페 삭제, 2일차 저녁 식당 변경" 등 세부 요구사항
+
     estimated_cost: Optional[dict]          # 예상 경비 breakdown
     accommodations: Optional[List[dict]]   # 검색된 숙소 목록
     tourist_spots: Optional[List[dict]]   # 검색된 관광지 목록

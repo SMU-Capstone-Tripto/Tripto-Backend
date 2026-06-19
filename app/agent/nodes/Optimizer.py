@@ -461,19 +461,30 @@ def _build_skeletons(
 def _is_intercity_event(line: str, origin: str, dest: str) -> bool:
     """LLM이 중복 생성한 단일 시각 출발지·목적지 이벤트 줄 감지.
     예: '05:13 서울 출발', '07:50 부산역 도착' → True
+    '06:13 서울 → 11:26 부산 (KTX)' → True  (도시 간 이동 복합 줄)
     '09:00~10:30 관광 (부산타워)' → False  (활동 항목은 제외)
     """
-    if not line or "~" in line:
+    if not line or re.match(r'^\d{2}:\d{2}~', line):
         return False
     m = re.match(r'^\d{2}:\d{2}\s+(.*)', line.strip())
     if not m:
         return False
     desc = m.group(1).strip()
+
+    # 형식 1: "서울역 출발" / "부산역 도착"
     for city in (origin, dest):
         for suffix in ("", "역"):
             for kw in ("출발", "도착"):
                 if desc == f"{city}{suffix} {kw}":
                     return True
+
+    # 형식 2: "서울 → 11:26 부산 (KTX)" — 두 도시 모두 포함된 이동 복합 줄
+    if "→" in desc:
+        has_origin = any(origin + s in desc for s in ("", "역"))
+        has_dest   = any(dest   + s in desc for s in ("", "역"))
+        if has_origin and has_dest:
+            return True
+
     return False
 
 
@@ -514,6 +525,8 @@ def Optimizer(state: TravelState) -> dict:
     budget            = budget_per_person * num_people
     preferences       = state.get("preferences") or []
     origin_city       = state.get("origin_city", "")
+    # 2번 단계에서 추출한 세부 수정 피드백 가져오기
+    itinerary_feedback = state.get("itinerary_feedback")
 
     try:
         start_str, end_str = traveldates.split("~")
@@ -535,6 +548,15 @@ def Optimizer(state: TravelState) -> dict:
     restaurants        = state.get("restaurants") or []
     cafes              = state.get("cafes") or []
 
+    # itinerary_feedback에 언급된 장소명을 스켈레톤에서 미리 제거
+    # (재최적화 시 Restaurant_Searcher가 동일 장소를 재검색해서 다시 배정되는 것 방지)
+    if itinerary_feedback:
+        def _mentioned(title: str) -> bool:
+            return bool(title) and title in itinerary_feedback
+        restaurants   = [r for r in restaurants   if not _mentioned(r.get("title", ""))]
+        cafes         = [c for c in cafes         if not _mentioned(c.get("title", ""))]
+        tourist_spots = [t for t in tourist_spots if not _mentioned(t.get("title", ""))]
+
     # 숙소 선택 (첫 번째 숙소 사용)
     accommodations = state.get("accommodations") or []
     selected_acc   = accommodations[0] if accommodations else None
@@ -552,6 +574,21 @@ def Optimizer(state: TravelState) -> dict:
             "\n[필수 방문 장소 ★ - 예산·동선과 무관하게 반드시 일정에 포함]\n"
             + "\n".join(f"- {p}" for p in must_visit)
         )
+    
+    # 프롬프트에 주입할 세부 피드백 섹션 정의
+    feedback_section = ""
+    if itinerary_feedback:
+        feedback_section = f"""
+                        [⚠️ 중요: 사용자 세부 수정 요구사항]
+                        사용자가 이전 일정에 대해 다음과 같은 세부 수정을 요구했습니다. 
+                        스켈레톤 구조를 기본으로 하되 아래 요구사항을 **반드시** 반영하여 일정을 완성해 주세요.
+                        - 요구사항: **{itinerary_feedback}**
+                        
+                        * 지침:
+                          - '카페 삭제' 요청: 해당 일차 스켈레톤에서 카페 활동 및 관련 이동 항목을 완전히 제외하고 앞뒤 시간을 매끄럽게 연결해줘.
+                          - '식당 변경' 요청: 스켈레톤의 해당 식당명 대신 지역의 다른 식당명으로 교체해줘.
+                          - '특정 장소 삭제/제외' 요청: 해당 장소는 이미 스켈레톤에서 제거된 상태야. 만약 스켈레톤에 남아있다면 완전히 제외하고 앞뒤 시간을 자연스럽게 연결해줘. 절대 해당 장소를 일정에 포함하지 말 것.
+                        """
 
     is_day_trip = num_days == 1
     accommodation_rule = (
@@ -564,8 +601,48 @@ def Optimizer(state: TravelState) -> dict:
         if is_day_trip else
         f"   - accommodation: 숙박비 (1박 요금 × {num_days - 1}박)"
     )
+    # ── [추가] 교통비 및 식비 고정 계산 로직 ──────────────────────────────
 
-    system_prompt = f"""
+    # 1. KTX 왕복 교통비 계산 (TAGO API 결과 중 KTX/철도 요금 기준 우선 추출)
+    transport_cost_total = 0
+    routes = state.get("transport_routes") or []
+    ktx_fare = 0
+
+    for r in routes:
+        if "KTX" in str(r.get("type", "")) or "철도" in str(r.get("type", "")):
+            ktx_fare = _to_int_fare(r.get("fare", 0))
+            break
+
+    # 만약 API 결과에 없거나 0원인 경우 일반적인 KTX 편도 평균 요금(예: 50,000원)을 Fallback으로 지정
+    if ktx_fare == 0:
+        ktx_fare = 50000 
+
+    # KTX 왕복 교통비 (편도 요금 × 2 × 인원수)
+    transport_cost_total = ktx_fare * 2 * num_people
+
+    # 2. 숙박비 계산
+    accommodation_cost_total = 0
+    if not is_day_trip:
+        if selected_acc:
+            rooms    = selected_acc.get("rooms", [])
+            suitable = [r for r in rooms if r.get("max_capacity", 0) >= num_people] or rooms
+            prices   = [r["min_price"] for r in suitable if r["min_price"] > 0]
+            min_room_price = min(prices) if prices else 100000
+        else:
+            min_room_price = 100000  # 숙소 검색 결과 없을 때 기본값 (성수기 1박 기준)
+        accommodation_cost_total = min_room_price * (num_days - 1)
+
+    # 3. 식비 고정 계산 (1인 1끼 15,000원 × 3끼 × 여행일수 × 인원수)
+    meals_cost_total = 15000 * 3 * num_days * num_people
+
+    # 4. 관광/활동비는 남은 예산으로 배정하되, 음수가 되지 않도록 방어
+    remaining_budget = budget - (transport_cost_total + accommodation_cost_total + meals_cost_total)
+    activities_cost_total = max(0, remaining_budget)
+
+    # 5. 최종 합계 재계산 (설정 예산 총액 이하로 안전하게 통제)
+    total_calculated = transport_cost_total + accommodation_cost_total + meals_cost_total + activities_cost_total
+
+    system_prompt = fsystem_prompt = f"""
                         너는 여행 일정 최적화 전문가야. 아래 **스켈레톤**을 기반으로 완성된 일정을 만들어줘.
                         스켈레톤의 장소 순서와 이동 정보는 이미 최적화되어 있으니 그대로 사용할 것.
 
@@ -588,35 +665,47 @@ def Optimizer(state: TravelState) -> dict:
                         [작성 규칙]
                         1. 스켈레톤의 장소 순서·식사 장소·'→ 이동:' 줄을 그대로 사용할 것. 순서 변경·생략·식당명 교체 금지.
                            - 중복 방지: 같은 장소가 두 번 등장하면 나중 항목을 삭제하고 직전 장소 체류 연장으로 채울 것.
+                           - [★중요] 2일차 이후 포함 모든 일차의 식당·관광지명은 반드시 스켈레톤에 명시된 고유 명칭을 그대로 사용할 것.
+                             '식당', '근처 식당', '맛집', '관광지' 같은 일반 명칭 절대 금지. 스켈레톤에 없는 장소 임의 추가 금지.
                         2. schedule 항목은 세 종류:
                         ① 이벤트 항목 (단일 시각): "HH:MM [장소명] [도착/출발/귀환/체크인/체크아웃]"
                            - 장소에 처음 도착하거나 떠날 때 사용. 시간 범위 없음.
-                           - 예: "15:30 경주역 도착", "21:00 일성 경주보문콘도 귀환"
                         ② 활동 항목 (시간 범위): "HH:MM~HH:MM 활동내용 (장소명)"
                            - 관광·식사·카페 등 체류 활동. 반드시 시작~종료 시간 명시.
-                           - 예: "16:00~17:30 관광 (불국사)", "18:30~19:30 저녁 식사 (경주 현지 식당)"
                         ③ 이동 항목 (타임스탬프 없음): "장소A → 장소B (대중교통 정보 / 택시 정보)"
-                           - 대중교통과 택시 두 옵션을 항상 병기. 스켈레톤의 '→ 이동:' 줄을 그대로 사용.
-                           - 예: "숙소 → 불국사 (70번 버스 탑승(25분)→하차·1,500원 / 택시 약 15분·7,000원)"
                         ★ 이동 항목에 타임스탬프 절대 금지. 도착 시각은 ① 이벤트 항목으로 별도 표시.
-                        3. 활동별 표준 소요시간:
-                        - 관광지: 60~90분 / 식사: 60분 / 카페: 30분
+                        
+                        3. [★중요 - 식사 시간 고정 규칙]
+                        하루에 아침, 점심, 저녁 세 끼 식사 시간을 아래 시각에 정확히 맞추어 일정을 전개해야 함:
+                        - 아침 식사: 반드시 "09:00~10:00 아침 식사 (식당명)"으로 고정
+                        - 점심 식사: 반드시 "13:00~14:00 점심 식사 (식당명)"으로 고정
+                        - 저녁 식사: 반드시 "18:00~19:00 저녁 식사 (식당명)"으로 고정
+                        * 식사 시작 시각에 맞추기 위해 직전 관광 활동 종료 시각과 이동 시간을 조밀하게 계산할 것.
+
+                        4. 활동별 표준 소요시간:
+                        - 관광지: 60~90분 / 식사: 60분 분량 고정 / 카페: 30분
                         - 숙소 체크인: "HH:MM 숙소명 체크인" (15:00 고정) / 체크아웃: "HH:MM 숙소명 체크아웃" (11:30)
-                        4. 시간 배정 원칙 (연속 흐름 — 공백 금지):
+
+                        5. 시간 배정 원칙 (연속 흐름 — 공백 금지):
                         - 각 이벤트 시각 = 이전 활동 종료 시각 + 이동 소요시간. 30분 이상 공백 절대 금지.
-                        - 오전 관광: 09:00 시작 / 점심 식사: 11:00~13:30 범위 / 저녁 식사: 17:30~20:00 범위
-                        - 공백 발생 시: 이전 장소 체류 연장 또는 "자유 시간 / 산책 (장소명 인근)" 항목 추가
-                        5. 매일(마지막날 제외) 저녁 식사 후 반드시 숙소 귀환:
+                        - 식사 고정 시각 사이에 비는 시간이 발생할 경우, 이전 장소 체류를 연장하거나 "자유 시간 / 산책 (장소명 인근)" 항목을 추가하여 시간을 촘촘하게 연결할 것.
+
+                        6. 매일(마지막날 제외) 저녁 식사 후 반드시 숙소 귀환:
                         - "저녁식당 → 숙소명 (이동정보)" (③ 이동 항목)
                         - "HH:MM 숙소명 귀환" (① 이벤트 항목, 20:00~22:00 범위)
+
                         {accommodation_rule}
                         7. 필수 방문 장소(★)가 있으면 반드시 포함
-                        8. cost_breakdown은 {num_people}명 전체 합산 금액 기준
-                        - transportation: 왕복 교통비 (편도요금 × 2 × {num_people}명)
-                        {accommodation_cost}
-                        - meals: 식비 (1인 1끼 평균 15,000원 × 3끼 × {num_days}일 × {num_people}명)
-                        - activities: 관광/입장료 (1인 요금 × {num_people}명)
-                        - total: 위 항목 합계. 반드시 {budget:,}원 이하여야 함. 초과 시 activities → meals 순으로 줄일 것.
+
+                        8. [★중요 - 경비 산출 규칙]
+                        cost_breakdown 항목은 계산 규칙을 무시하고 절대 임의의 숫자를 지어내거나 뻥튀기하지 마라.
+                        반드시 아래에 지정된 숫자를 **그대로** 복사해서 출력해라:
+                        - transportation: {transport_cost_total}  (KTX 왕복 교통비만 한정 반영된 총액)
+                        - accommodation: {accommodation_cost_total}
+                        - meals: {meals_cost_total}  (1인 1끼 15,000원 기준 고정 총액)
+                        - activities: {activities_cost_total}
+                        - total: {total_calculated}
+
                         9. title: 여행지와 테마가 담긴 매력적인 한국어 제목
                         10. 출발/귀환 교통편은 Python이 자동 삽입하므로 schedule에 추가하지 말 것.
                     """
@@ -692,12 +781,13 @@ def Optimizer(state: TravelState) -> dict:
         "current_step": "optimized",
         "plan_title": plan.title,
         "itinerary": itinerary,
+        "itinerary_feedback": None,  # 처리 완료 후 초기화
         "estimated_cost": {
-            "transportation": plan.cost_breakdown.transportation,
-            "accommodation":  plan.cost_breakdown.accommodation,
-            "meals":          plan.cost_breakdown.meals,
-            "activities":     plan.cost_breakdown.activities,
-            "total":          plan.cost_breakdown.total,
+            "transportation": transport_cost_total,
+            "accommodation":  accommodation_cost_total,
+            "meals":          meals_cost_total,
+            "activities":     activities_cost_total,
+            "total":          total_calculated,
             "budget":         budget,  # 설정 예산 (비교용)
         },
     }

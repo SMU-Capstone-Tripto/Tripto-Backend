@@ -43,10 +43,9 @@ def Tourist_Searcher(state: TravelState) -> dict:
     ]
 
     if district:
-        tourist_spots = [
-            t for t in tourist_spots
-            if _district_match(district, t.get("address", ""))
-        ]
+        filtered = [t for t in tourist_spots if _district_match(district, t.get("address", ""))]
+        if filtered:
+            tourist_spots = filtered
 
     return {
         "current_step": "searching",

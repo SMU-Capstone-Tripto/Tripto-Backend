@@ -42,9 +42,9 @@ def _to_spot_dict(title: str, address: str, category: str, location: str, **extr
     """네이버 지오코딩으로 좌표를 조회하여 spot dict 반환"""
     sort = "comment" if category in ("맛집", "카페") else "random"
     coord = (
-        geocode(title, sort)                     # 1순위: 장소명 단독
-        or geocode(f"{location} {title}", sort)  # 2순위: "김포 김포국제대공원"
-        or geocode(f"{address} {title}", sort)   # 3순위: LLM 검색어 + 장소명 조합
+        geocode(f"{location} {title}", sort)     # 1순위: "부산 깡통시장"
+        or geocode(title, sort)                  # 2순위: 장소명 단독
+        or geocode(f"{address} {title}", sort)   # 3순위: 주소 결합
     )
     return {
         "title":      title,

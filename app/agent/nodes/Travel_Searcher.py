@@ -79,10 +79,9 @@ def Travel_Searcher(state: TravelState) -> dict:
         accommodations = [r for f in futures for r in [f.result()] if r is not None]
 
     if district:
-        accommodations = [
-            a for a in accommodations
-            if _district_match(district, a.get("address", ""))
-        ]
+        filtered = [a for a in accommodations if _district_match(district, a.get("address", ""))]
+        if filtered:
+            accommodations = filtered
 
     if budget:
         def _sort_key(a: dict) -> float:

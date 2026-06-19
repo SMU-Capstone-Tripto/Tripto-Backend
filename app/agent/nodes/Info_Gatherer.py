@@ -1,3 +1,4 @@
+import re
 from langchain_core.messages import AIMessage
 from state import TravelState
 
@@ -21,22 +22,34 @@ def _district_already_asked(state: TravelState) -> bool:
     )
 
 
-_CONFIRM_WORDS = [
+_CONFIRM_WORDS = {
     "네", "예", "맞아", "맞아요", "확인", "ok", "오케이",
     "좋아", "진행", "맞습니다", "맞음", "ㅇㅇ", "응", "그래",
     "correct", "yes", "괜찮아", "괜찮습니다",
-]
+}
+
+
+def _is_confirmed(text: str) -> bool:
+    """공백·구두점 기준으로 토큰 분리 후 확인 단어 포함 여부 판단 (부분 문자열 오매칭 방지)."""
+    tokens = set(re.split(r"[\s,!?.~]+", text.strip()))
+    return bool(tokens & _CONFIRM_WORDS)
 
 
 def Info_Gatherer(state: TravelState) -> dict:
     """필수 정보 점검 후 부족하면 AIMessage로 질문 반환"""
+    current_step = state.get("current_step")
+    user_q = (state.get("question") or "").strip().lower()
 
-    # 확인 대기 중: 사용자 응답이 긍정이면 검색 진행, 수정 요청이면 fall-through
-    if state.get("current_step") == "awaiting_confirmation":
-        user_q = (state.get("question") or "").strip().lower()
-        if any(w in user_q for w in _CONFIRM_WORDS):
-            return {"current_step": "confirmed"}
-        # 수정 요청 → 아래 일반 정보 수집 로직으로 계속 처리
+    # 1. 확인 대기 중이거나 이미 일정이 완성된 상태에서 사용자가 말을 건 경우
+    if current_step in ["awaiting_confirmation", "optimized"]:
+        # 사용자가 긍정(네, 확인 등)을 했다면
+        if _is_confirmed(user_q):
+            # 대기 중이었다면 confirmed로 넘어가서 검색/최적화 진행
+            if current_step == "awaiting_confirmation":
+                return {"current_step": "confirmed"}
+            # 이미 완성이 된 상태에서 '네'라고 하면 종료 혹은 유지
+            else:
+                return {"current_step": "completed"}
 
     missing = [
         (field, q_text)

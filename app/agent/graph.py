@@ -15,6 +15,7 @@ from nodes.Restaurant_Searcher import Restaurant_Searcher
 from nodes.Transport_Searcher import Transport_Searcher
 from nodes.Spot_Enhancer import Spot_Enhancer
 from nodes.Optimizer import Optimizer
+from nodes.Revision_Manager import Revision_Manager
 
 
 _STATUS = {
@@ -27,6 +28,7 @@ _STATUS = {
     "restaurant_searcher": "식당 검색 중...",
     "transport_searcher":  "교통편 검색 중...",
     "optimizer":           "일정 최적화 중...",
+    "revision_manager":    "일정 수정 중...",
 }
 
 
@@ -40,12 +42,20 @@ def _node(name: str, fn):
 def route_info(state: TravelState):
     """정보 수집 완료 → 확인 요청, 사용자 확인 → 검색 시작, 부족하면 END"""
     step = state.get("current_step")
+
     if step == "confirmed":
-        print("\n[상태] 사용자 확인 완료 → 숙소/관광지/식당/교통 동시 검색 시작")
+        # 기존 일정이 있고 수정 피드백이 있으면 → 경량 수정 경로
+        if state.get("itinerary") and state.get("itinerary_feedback"):
+            print("\n[상태] 기존 일정 수정 요청 → Revision_Manager")
+            return "revision_manager"
+        # 최초 일정 생성 → 전체 검색 + 최적화
+        print("\n[상태] 사용자 확인 완료 -> 최적화 프로세스 진행")
         return ["travel_searcher", "tourist_searcher", "restaurant_searcher", "transport_searcher"]
+
     if step == "info_gathered":
-        print("\n[상태] 모든 정보 수집 완료 → 사용자 확인 요청")
+        print("\n[상태] 모든 정보 수집 완료 -> 사용자 확인 요청")
         return "confirmer"
+
     return END
 
 
@@ -61,6 +71,7 @@ def build_graph():
     workflow.add_node("transport_searcher",   _node("transport_searcher",   Transport_Searcher))
     workflow.add_node("spot_enhancer",        _node("spot_enhancer",        Spot_Enhancer))
     workflow.add_node("optimizer",            _node("optimizer",            Optimizer))
+    workflow.add_node("revision_manager",     _node("revision_manager",     Revision_Manager))
 
     workflow.add_edge(START, "intent_analyzer")
     workflow.add_edge("intent_analyzer", "info_gatherer")
@@ -71,7 +82,8 @@ def build_graph():
     workflow.add_edge("spot_enhancer",       "optimizer")
     workflow.add_edge("restaurant_searcher", "optimizer")
     workflow.add_edge("transport_searcher",  "optimizer")
-    workflow.add_edge("optimizer", END)
+    workflow.add_edge("optimizer",           END)
+    workflow.add_edge("revision_manager",    END)
 
     return workflow.compile()
 
@@ -95,7 +107,9 @@ if __name__ == "__main__":
     for _ in range(MAX_TURNS):
         result = app.invoke(state)
 
-        if result.get("current_step") == "optimized":
+        # 사용자가 변경 사항 없이 최종 만족하여 '네'라고 했을 때만 루프 탈출
+        if result.get("current_step") == "completed":
+            print("\n즐거운 여행 되세요! 일정을 종료합니다.")
             break
 
         messages = result.get("messages", [])
