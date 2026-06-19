@@ -1,4 +1,5 @@
 import os
+import re
 import math
 from datetime import datetime, timedelta
 from typing import List
@@ -7,7 +8,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
-from _naver_api import search_route
+from _naver_api import search_route, geocode
 from state import TravelState
 
 load_dotenv()
@@ -58,6 +59,16 @@ _WALK_KM   = 1.2   # 직선 1.2 km 이하 → 도보 (좌표 오차 감안, 약 
 _WALK_M_PM = 80    # 도보 속도 80m/min
 
 
+def _to_int_fare(val) -> int:
+    """fare 값을 안전하게 int로 변환. 문자열·콤마·'원' 등 포함 형태 모두 처리."""
+    if isinstance(val, int):
+        return val
+    try:
+        return int(str(val).replace(",", "").replace("원", "").strip())
+    except (ValueError, AttributeError):
+        return 0
+
+
 def _walk_str(km: float) -> str:
     return f"도보 약 {max(1, int(km * 1000 / _WALK_M_PM))}분"
 
@@ -68,6 +79,8 @@ def _transit_info(km: float,
     taxi_min  = int(km / 30 * 60) + 5
     taxi_fare = int(4800 + max(0, km - 1.6) * 1000)
     taxi_str  = f"택시 약 {taxi_min}분·{taxi_fare:,}원"
+    bus_min   = int(km / 20 * 60) + 10
+    bus_str   = f"버스 약 {bus_min}분·1,500원(추정)"
 
     # 직선거리 기준 도보 판정 (좌표 오차 감안해 1.2 km까지 도보)
     if km < _WALK_KM:
@@ -85,10 +98,10 @@ def _transit_info(km: float,
             # 자동차 경로 10분 이하 → 도보로 충분한 거리로 판단
             if naver["type"] == "driving" and naver["time"] <= 10:
                 return _walk_str(km)
-            return f"택시 약 {naver['time']}분·{fare_str}"
+            # 드라이빙 fallback: 대중교통 추정치도 함께 제공
+            return f"{bus_str} / 택시 약 {naver['time']}분·{fare_str}"
 
-    bus_min = int(km / 20 * 60) + 10
-    return f"버스 약 {bus_min}분·1,500원(추정) / {taxi_str}"
+    return f"{bus_str} / {taxi_str}"
 
 
 def _transit_between(a: dict, b: dict) -> str:
@@ -96,15 +109,94 @@ def _transit_between(a: dict, b: dict) -> str:
     ca = _parse_coord(a)
     cb = _parse_coord(b)
     if not ca or not cb:
-        # 좌표 없는 경우 도보 5분 기본값으로 LLM이 경로를 생략하지 않도록 유도
         return "도보 약 5~15분 (정확한 경로는 현지 확인)"
     km = _haversine_km(ca[0], ca[1], cb[0], cb[1])
     return _transit_info(km, ca, cb)
 
 
+def _build_departure_sequence(
+    origin: str,
+    dest: str,
+    routes: list,
+    accommodation: dict | None,
+) -> list[str]:
+    """
+    1일차 출발 시퀀스를 최대 4줄로 반환.
+      1) "HH:MM {origin}역 출발"
+      2) "{origin}역 → {dest}역 (수단·요금/인)"
+      3) "HH:MM {dest}역 도착"
+      4) "{dest}역 → {숙소명} (대중교통 / 택시)"  ← 숙소 좌표 있을 때만
+    routes 없으면 단순 이동 1줄만 반환.
+    """
+    if not routes:
+        return [f"{origin} → {dest} (대중교통 이용 예정)"]
+
+    def _key(r):
+        return (0 if _to_int_fare(r.get("fare", 0)) > 0 else 1, str(r.get("dep_time", "")))
+    best  = min(routes, key=_key)
+    rtype = best.get("type", "교통편")
+    grade = best.get("grade", "")
+    fare  = _to_int_fare(best.get("fare", 0))
+    dep   = str(best.get("dep_time", ""))
+    arr   = str(best.get("arr_time", ""))
+
+    # 출발·도착 시각 파싱
+    dep_fmt = f"{dep[8:10]}:{dep[10:12]}" if len(dep) >= 12 else ""
+    arr_fmt = f"{arr[8:10]}:{arr[10:12]}" if len(arr) >= 12 else ""
+
+    vehicle = (f"{rtype} {grade}").strip() if grade else rtype
+    fare_str = f"{fare:,}원/인" if fare > 0 else "요금미정"
+
+    lines: list[str] = []
+
+    if dep_fmt:
+        lines.append(f"{dep_fmt} {origin}역 출발")
+    lines.append(f"{origin}역 → {dest}역 ({vehicle}·{fare_str})")
+    if arr_fmt:
+        lines.append(f"{arr_fmt} {dest}역 도착")
+
+    # 도착역 → 숙소 이동 계산
+    if accommodation:
+        acc_coord = _parse_coord(accommodation)
+        station_coord = geocode(f"{dest}역")
+        if acc_coord and station_coord:
+            km = _haversine_km(station_coord[0], station_coord[1],
+                               acc_coord[0], acc_coord[1])
+            transit_str = _transit_info(km, station_coord, acc_coord)
+            acc_title = accommodation.get("title", "숙소")
+            lines.append(f"{dest}역 → {acc_title} ({transit_str})")
+
+    return lines
+
+
+def _build_return_sequence(origin: str, dest: str, routes: list) -> list[str]:
+    """
+    마지막날 귀환 시퀀스를 최대 3줄로 반환.
+      1) "HH:MM {dest}역 출발"
+      2) "{dest}역 → {origin}역 (수단·요금/인)"
+      3) "HH:MM {origin}역 도착"
+    routes 없으면 단순 이동 1줄만 반환.
+    """
+    if not routes:
+        return [f"{dest} → {origin} (대중교통 이용 예정)"]
+
+    def _key(r):
+        return (0 if _to_int_fare(r.get("fare", 0)) > 0 else 1, str(r.get("dep_time", "")))
+    best  = min(routes, key=_key)
+    rtype = best.get("type", "교통편")
+    grade = best.get("grade", "")
+    fare  = _to_int_fare(best.get("fare", 0))
+
+    vehicle  = (f"{rtype} {grade}").strip() if grade else rtype
+    fare_str = f"{fare:,}원/인" if fare > 0 else "요금미정"
+
+    return [f"{dest}역 → {origin}역 ({vehicle}·{fare_str})"]
+
+
 # ── 동선 최적화  ──────────────────────────────────────
 
-def _sort_nearest_neighbor(spots: list) -> list:
+def _sort_nearest_neighbor(spots: list, start_coord: tuple[float, float] | None = None) -> list:
+    """nearest-neighbor 순 정렬. start_coord가 주어지면 해당 좌표에 가장 가까운 장소부터 시작."""
     if len(spots) <= 1:
         return spots
 
@@ -115,8 +207,16 @@ def _sort_nearest_neighbor(spots: list) -> list:
     if not with_coord:
         return spots
 
-    visited   = [with_coord[0][0]]
-    remaining = list(with_coord[1:])
+    if start_coord:
+        first = min(
+            with_coord,
+            key=lambda x: _haversine_km(start_coord[0], start_coord[1], coords[x[0]][0], coords[x[0]][1]),
+        )
+    else:
+        first = with_coord[0]
+
+    visited   = [first[0]]
+    remaining = [x for x in with_coord if x[0] != first[0]]
 
     while remaining:
         last = coords[visited[-1]]
@@ -139,7 +239,7 @@ def _summarize_transport(routes: list) -> str:
     for r in routes[:5]:
         rtype = r.get("type", "")
         grade = r.get("grade", "")
-        fare  = int(r.get("fare", 0))
+        fare  = _to_int_fare(r.get("fare", 0))
         dep   = str(r.get("dep_time", ""))
         arr   = str(r.get("arr_time", ""))
         if len(dep) >= 12:
@@ -248,7 +348,8 @@ def _build_skeletons(
         (skeleton_text, day_transits)
         day_transits[d]: d일차의 이동 줄 목록 — LLM이 누락해도 후처리로 강제 삽입
     """
-    sorted_spots = _sort_nearest_neighbor(tourist_spots)
+    acc_coord    = _parse_coord(accommodation) if accommodation else None
+    sorted_spots = _sort_nearest_neighbor(tourist_spots, start_coord=acc_coord)
 
     # 관광지를 일자별로 배분
     spots_per_day: list[list] = []
@@ -355,6 +456,25 @@ def _build_skeletons(
         parts.append("\n".join(lines))
 
     return "\n\n".join(parts), day_transits
+
+
+def _is_intercity_event(line: str, origin: str, dest: str) -> bool:
+    """LLM이 중복 생성한 단일 시각 출발지·목적지 이벤트 줄 감지.
+    예: '05:13 서울 출발', '07:50 부산역 도착' → True
+    '09:00~10:30 관광 (부산타워)' → False  (활동 항목은 제외)
+    """
+    if not line or "~" in line:
+        return False
+    m = re.match(r'^\d{2}:\d{2}\s+(.*)', line.strip())
+    if not m:
+        return False
+    desc = m.group(1).strip()
+    for city in (origin, dest):
+        for suffix in ("", "역"):
+            for kw in ("출발", "도착"):
+                if desc == f"{city}{suffix} {kw}":
+                    return True
+    return False
 
 
 def _inject_transits(schedule: list[str], transits: list[str]) -> list[str]:
@@ -467,23 +587,28 @@ def Optimizer(state: TravelState) -> dict:
 
                         [작성 규칙]
                         1. 스켈레톤의 장소 순서·식사 장소·'→ 이동:' 줄을 그대로 사용할 것. 순서 변경·생략·식당명 교체 금지.
-                           - 중복 방지: 전 일정에 걸쳐 같은 장소(또는 동일 지역의 유사 명칭, 예: 광안리해수욕장 / 광안리바다)가 두 번 등장하면 나중 항목을 삭제하고 해당 시간은 직전 장소 체류 연장으로 채울 것.
-                        2. schedule 항목은 두 종류만:
-                        ① 활동 항목: "HH:MM~HH:MM 활동내용 (장소명)"
-                           - 반드시 시작~종료 시간 범위를 명시할 것. 단일 시각 형식 절대 금지.
-                           - 예: "09:00~10:30 관광 (해동용궁사)", "11:45~12:45 점심 식사 (초량밀면)"
-                        ② 이동 항목 (타임스탬프 없음): "장소A → 장소B (수단·소요시간·비용)"
-                        ★ 스켈레톤의 '→ 이동:' 줄은 반드시 ② 이동 항목으로 삽입. 타임스탬프 금지.
+                           - 중복 방지: 같은 장소가 두 번 등장하면 나중 항목을 삭제하고 직전 장소 체류 연장으로 채울 것.
+                        2. schedule 항목은 세 종류:
+                        ① 이벤트 항목 (단일 시각): "HH:MM [장소명] [도착/출발/귀환/체크인/체크아웃]"
+                           - 장소에 처음 도착하거나 떠날 때 사용. 시간 범위 없음.
+                           - 예: "15:30 경주역 도착", "21:00 일성 경주보문콘도 귀환"
+                        ② 활동 항목 (시간 범위): "HH:MM~HH:MM 활동내용 (장소명)"
+                           - 관광·식사·카페 등 체류 활동. 반드시 시작~종료 시간 명시.
+                           - 예: "16:00~17:30 관광 (불국사)", "18:30~19:30 저녁 식사 (경주 현지 식당)"
+                        ③ 이동 항목 (타임스탬프 없음): "장소A → 장소B (대중교통 정보 / 택시 정보)"
+                           - 대중교통과 택시 두 옵션을 항상 병기. 스켈레톤의 '→ 이동:' 줄을 그대로 사용.
+                           - 예: "숙소 → 불국사 (70번 버스 탑승(25분)→하차·1,500원 / 택시 약 15분·7,000원)"
+                        ★ 이동 항목에 타임스탬프 절대 금지. 도착 시각은 ① 이벤트 항목으로 별도 표시.
                         3. 활동별 표준 소요시간:
                         - 관광지: 60~90분 / 식사: 60분 / 카페: 30분
-                        - 숙소 체크인: 15:00~15:30 / 체크아웃: 11:30~12:00
+                        - 숙소 체크인: "HH:MM 숙소명 체크인" (15:00 고정) / 체크아웃: "HH:MM 숙소명 체크아웃" (11:30)
                         4. 시간 배정 원칙 (연속 흐름 — 공백 금지):
-                        - 각 활동 시작 시각 = 이전 활동 종료 시각 + 이동 소요시간. 30분 이상 공백 절대 금지.
-                        - 아침 식사: 08:00 고정 / 오전 관광: 09:00 시작
-                        - 점심 식사: 오전 마지막 관광 종료 + 이동 후 바로 시작 (11:00~13:30 범위)
-                        - 저녁 식사: 카페 또는 오후 마지막 관광 종료 + 이동 후 바로 시작 (17:30~20:00 범위)
-                        - 공백이 발생하면: 이전 장소 체류 시간을 연장하거나 "자유 시간 / 산책 (장소명 인근)" 항목 추가
-                        5. 오전 관광 09:00 시작, 오후 20:00 이전 마무리. 카페는 오후 관광 직후 배치.
+                        - 각 이벤트 시각 = 이전 활동 종료 시각 + 이동 소요시간. 30분 이상 공백 절대 금지.
+                        - 오전 관광: 09:00 시작 / 점심 식사: 11:00~13:30 범위 / 저녁 식사: 17:30~20:00 범위
+                        - 공백 발생 시: 이전 장소 체류 연장 또는 "자유 시간 / 산책 (장소명 인근)" 항목 추가
+                        5. 매일(마지막날 제외) 저녁 식사 후 반드시 숙소 귀환:
+                        - "저녁식당 → 숙소명 (이동정보)" (③ 이동 항목)
+                        - "HH:MM 숙소명 귀환" (① 이벤트 항목, 20:00~22:00 범위)
                         {accommodation_rule}
                         7. 필수 방문 장소(★)가 있으면 반드시 포함
                         8. cost_breakdown은 {num_people}명 전체 합산 금액 기준
@@ -493,9 +618,7 @@ def Optimizer(state: TravelState) -> dict:
                         - activities: 관광/입장료 (1인 요금 × {num_people}명)
                         - total: 위 항목 합계. 반드시 {budget:,}원 이하여야 함. 초과 시 activities → meals 순으로 줄일 것.
                         9. title: 여행지와 테마가 담긴 매력적인 한국어 제목
-                        10. 1일차 schedule의 첫 번째 항목은 반드시 출발지→목적지 이동 항목이어야 함:
-                        "{origin_city} → {city} (교통수단·출발시간·소요시간·요금/인)" 형식, 타임스탬프 없음.
-                        교통편 정보가 없을 경우 "{origin_city} → {city} (대중교통 이용 예정)" 으로 작성.
+                        10. 출발/귀환 교통편은 Python이 자동 삽입하므로 schedule에 추가하지 말 것.
                     """
 
     llm = ChatGroq(
@@ -516,11 +639,53 @@ def Optimizer(state: TravelState) -> dict:
             "estimated_cost": {},
         }
 
+    transport_routes = state.get("transport_routes") or []
+    departure_seq = (
+        _build_departure_sequence(origin_city, city, transport_routes, selected_acc)
+        if origin_city and city else []
+    )
+    return_seq = (
+        _build_return_sequence(origin_city, city, transport_routes)
+        if origin_city and city else []
+    )
+
     itinerary = []
     for dp in plan.daily_plans:
-        day_idx = dp.day - 1
+        day_idx  = dp.day - 1
+        is_first = day_idx == 0
+        is_last  = day_idx == num_days - 1
+
+        # ── _inject_transits 실행 전 LLM 불필요 줄 제거 ──────────────────
+        # (이후 제거하면 transit 슬롯이 잘못 배정돼 고아 transit 줄 발생)
+        raw = list(dp.schedule)
+
+        # ① LLM이 HH:MM~HH:MM 활동 형식으로 쓴 이동 줄 제거
+        #    예: "09:00~09:01 장소A → 장소B (도보 약 1분)"
+        raw = [l for l in raw if not re.match(r'^\d{2}:\d{2}~\d{2}:\d{2}\s+.*→', l)]
+
+        # ② 1일차: LLM이 생성한 광역 이동 줄(→) 및 단일 이벤트(도착/출발) 제거
+        if is_first and origin_city:
+            raw = [l for l in raw
+                   if not (l and not l[0:1].isdigit() and "→" in l and origin_city in l)]
+            raw = [l for l in raw if not _is_intercity_event(l, origin_city, city)]
+
+        # ③ 마지막날: LLM이 생성한 귀환 줄 제거
+        if is_last and not is_first and origin_city:
+            raw = [l for l in raw
+                   if not (l and not l[0:1].isdigit() and "→" in l and city in l and origin_city in l)]
+            raw = [l for l in raw if not _is_intercity_event(l, city, origin_city)]
+
         transits = day_transits[day_idx] if 0 <= day_idx < len(day_transits) else []
-        schedule = _inject_transits(list(dp.schedule), transits)
+        schedule = _inject_transits(raw, transits)
+
+        # ── 광역 이동 시퀀스 삽입 ─────────────────────────────────────────
+        if is_first and departure_seq:
+            for i, line in enumerate(departure_seq):
+                schedule.insert(i, line)
+
+        if is_last and not is_first and return_seq:
+            schedule.extend(return_seq)
+
         itinerary.append(f"[{dp.day}일차 | {dp.date}]\n" + "\n".join(schedule))
 
     return {

@@ -64,12 +64,14 @@ def Travel_Searcher(state: TravelState) -> dict:
                 return None
 
         return {
-            "title": item.get("title", ""),
-            "address": (item.get("addr1", "") + " " + item.get("addr2", "")).strip(),
-            "tel": item.get("tel", ""),
-            "image": item.get("firstimage", ""),
+            "title":      item.get("title", ""),
+            "address":    (item.get("addr1", "") + " " + item.get("addr2", "")).strip(),
+            "tel":        item.get("tel", ""),
+            "image":      item.get("firstimage", ""),
             "content_id": content_id,
-            "rooms": rooms,
+            "mapx":       str(item.get("mapx", "")),
+            "mapy":       str(item.get("mapy", "")),
+            "rooms":      rooms,
         }
 
     with ThreadPoolExecutor(max_workers=5) as executor:

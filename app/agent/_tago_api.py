@@ -14,12 +14,23 @@ SUB_TIMETABLE_URL  = "http://apis.data.go.kr/1613000/SuburbsBusInfo/GetStrtpntAl
 TRAIN_SEARCH_URL   = "http://apis.data.go.kr/1613000/TrainInfo/GetStrtpntAlocFndTrainInfo"
 TRAIN_STATION_URL  = "http://apis.data.go.kr/1613000/TrainInfo/GetCtyAcctoTrainSttnList"
 
-# TAGO 기차 도시코드 매핑
+# TAGO 기차 도시코드 매핑 (광역시·도 단위)
 _CITY_CODE = {
     "서울": 11, "세종": 12,
     "부산": 21, "대구": 22, "인천": 23, "광주": 24, "대전": 25, "울산": 26,
     "경기": 31, "강원": 32, "충북": 33, "충남": 34,
     "전북": 35, "전남": 36, "경북": 37, "경남": 38,
+}
+
+# 시·군 도시명 → 광역시·도 키 매핑 (TAGO cityCode 조회용)
+_CITY_TO_PROVINCE_KEY = {
+    "경주": "경북", "포항": "경북", "안동": "경북", "구미": "경북",
+    "창원": "경남", "진주": "경남", "통영": "경남", "거제": "경남", "마산": "경남", "거창": "경남",
+    "전주": "전북", "군산": "전북", "익산": "전북", "남원": "전북", "정읍": "전북",
+    "여수": "전남", "순천": "전남", "목포": "전남", "광양": "전남", "나주": "전남",
+    "춘천": "강원", "강릉": "강원", "원주": "강원", "속초": "강원", "동해": "강원", "삼척": "강원",
+    "청주": "충북", "충주": "충북", "제천": "충북",
+    "천안": "충남", "공주": "충남", "보령": "충남", "아산": "충남", "서산": "충남",
 }
 
 
@@ -64,6 +75,11 @@ def _get_train_node_id(city: str) -> str | None:
         if key in city_clean:
             city_code = code
             break
+    # 광역시·도 직접 매핑 실패 시 시·군 → 도 매핑으로 재시도
+    if city_code is None:
+        province_key = _CITY_TO_PROVINCE_KEY.get(city_clean)
+        if province_key:
+            city_code = _CITY_CODE.get(province_key)
     if city_code is None:
         _node_id_cache[city_clean] = None
         return None

@@ -8,6 +8,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
+from _naver_api import geocode as _naver_geocode
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
@@ -108,19 +109,23 @@ def _make_naver_map_html(
     locations: list[tuple[str, tuple[float, float]]],
     fallback_center: tuple[float, float] = (37.5665, 126.9780),
     height: int = 520,
+    acc_indices: set[int] | None = None,
 ) -> str:
+    """acc_indices: 숙소에 해당하는 index 집합 (🏨 아이콘 및 별도 색상 적용)"""
     if locations:
         center_lat = sum(c[0] for _, c in locations) / len(locations)
         center_lon = sum(c[1] for _, c in locations) / len(locations)
     else:
         center_lat, center_lon = fallback_center
 
+    _acc = acc_indices or set()
     loc_js = json.dumps([
         {
             "name":  name,
             "lat":   lat,
             "lng":   lon,
-            "color": _MARKER_COLORS[i % len(_MARKER_COLORS)],
+            "color": "#f59e0b" if i in _acc else _MARKER_COLORS[i % len(_MARKER_COLORS)],
+            "isAcc": i in _acc,
         }
         for i, (name, (lat, lon)) in enumerate(locations)
     ])
@@ -152,20 +157,26 @@ def _make_naver_map_html(
       var pos = [loc.lat, loc.lng];
       latlngs.push(pos);
 
+      var inner = loc.isAcc
+        ? '🏨'
+        : (i + 1);
+      var size = loc.isAcc ? '18px' : '13px';
+
       var icon = L.divIcon({{
         html: '<div style="background:' + loc.color + ';color:#fff;border-radius:50%;' +
-              'width:30px;height:30px;display:flex;align-items:center;' +
-              'justify-content:center;font-size:13px;font-weight:700;' +
-              'box-shadow:0 2px 8px rgba(0,0,0,.4);">' + (i + 1) + '</div>',
+              'width:32px;height:32px;display:flex;align-items:center;' +
+              'justify-content:center;font-size:' + size + ';font-weight:700;' +
+              'box-shadow:0 2px 8px rgba(0,0,0,.4);">' + inner + '</div>',
         className: '',
-        iconSize: [30, 30],
-        iconAnchor: [15, 15],
-        popupAnchor: [0, -18]
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+        popupAnchor: [0, -20]
       }});
 
       L.marker(pos, {{ icon: icon }})
         .addTo(map)
-        .bindPopup('<div style="font-size:13px;font-weight:600;">' + (i + 1) + '. ' + loc.name + '</div>');
+        .bindPopup('<div style="font-size:13px;font-weight:600;">' +
+          (loc.isAcc ? '🏨 ' : (i + 1) + '. ') + loc.name + '</div>');
     }});
 
     if (latlngs.length > 1) {{
@@ -212,31 +223,62 @@ def _render_schedule_line(line: str):
             )
         return
 
-    # ① 활동 항목: "HH:MM~HH:MM 내용" 또는 "HH:MM 내용"
-    range_m = re.match(r'^(\d{2}:\d{2})~(\d{2}:\d{2})\s+(.*)', line)
+    # ② 활동 항목: "HH:MM~HH:MM 내용"
+    range_m  = re.match(r'^(\d{2}:\d{2})~(\d{2}:\d{2})\s+(.*)', line)
+    # ① 이벤트 항목: "HH:MM 내용 (도착/출발/귀환/체크인/체크아웃)"
     single_m = re.match(r'^(\d{2}:\d{2})\s+(.*)', line)
+
+    _EVENT_KW = ("도착", "출발", "귀환", "체크인", "체크아웃")
+
+    # 활동 유형별 배경색·좌측 강조선 색
+    def _activity_style(body: str) -> tuple[str, str]:
+        b = body
+        if any(k in b for k in ("관광", "방문", "탐방", "투어", "체험")):
+            return "#eff6ff", "#2563eb"   # 파랑 계열 — 관광
+        if any(k in b for k in ("식사", "아침", "점심", "저녁", "브런치", "맛집")):
+            return "#fff7ed", "#f97316"   # 주황 계열 — 식사
+        if any(k in b for k in ("카페", "디저트", "커피")):
+            return "#fdf4ff", "#a855f7"   # 보라 계열 — 카페
+        if any(k in b for k in ("체크인", "체크아웃", "숙소")):
+            return "#f0fdf4", "#16a34a"   # 초록 계열 — 숙소
+        return "#f9fafb", "#6b7280"       # 회색 — 기타
 
     if range_m:
         t_start = range_m.group(1)
         t_end   = range_m.group(2)
         body    = range_m.group(3)
+        bg, accent = _activity_style(body)
         st.markdown(
-            f"<div style='margin:6px 0;display:flex;align-items:baseline;gap:8px;'>"
-            f"<span style='color:#2563eb;font-weight:700;white-space:nowrap;font-size:0.9rem;'>"
+            f"<div style='margin:5px 0;padding:7px 10px;border-radius:8px;"
+            f"background:{bg};border-left:4px solid {accent};"
+            f"display:flex;align-items:baseline;gap:8px;'>"
+            f"<span style='color:{accent};font-weight:700;white-space:nowrap;font-size:0.9rem;'>"
             f"{t_start}~{t_end}</span>"
-            f"<span>{body}</span>"
+            f"<span style='color:#1f2937;'>{body}</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
     elif single_m:
-        st.markdown(
-            f"<div style='margin:6px 0;'>"
-            f"<span style='color:#2563eb;font-weight:700;margin-right:8px;'>{single_m.group(1)}</span>"
-            f"{single_m.group(2)}</div>",
-            unsafe_allow_html=True,
-        )
+        t    = single_m.group(1)
+        desc = single_m.group(2)
+        is_event = any(kw in desc for kw in _EVENT_KW)
+        if is_event:
+            # 도착·출발·귀환 등 단일 시각 이벤트 — 컴팩트한 회색 스타일
+            st.markdown(
+                f"<div style='margin:3px 0 3px 4px;display:flex;align-items:center;gap:8px;'>"
+                f"<span style='color:#6b7280;font-weight:600;font-size:0.85rem;white-space:nowrap;'>{t}</span>"
+                f"<span style='color:#374151;font-size:0.88rem;'>{desc}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div style='margin:6px 0;'>"
+                f"<span style='color:#2563eb;font-weight:700;margin-right:8px;'>{t}</span>"
+                f"{desc}</div>",
+                unsafe_allow_html=True,
+            )
     else:
-        # 타임스탬프 없는 일반 줄 (체크인 등 fallback)
         st.markdown(
             f"<div style='margin:4px 0;color:#374151;'>{line}</div>",
             unsafe_allow_html=True,
@@ -275,13 +317,41 @@ def _render_itinerary_tabs(itinerary: list[str], result: dict):
 
             with col_map:
                 locations = _extract_day_locations(schedule_lines, coord_lookup)
-                map_html  = _make_naver_map_html(locations)
+
+                # 숙소 핀 추가
+                acc_idx_set: set[int] = set()
+                acc_list = result.get("accommodations") or []
+                if acc_list:
+                    acc       = acc_list[0]
+                    acc_title = acc.get("title", "")
+                    # ① coord_lookup → ② dict 직접 파싱 → ③ Naver 검색 순으로 fallback
+                    acc_coord = (
+                        coord_lookup.get(acc_title)
+                        or _parse_coord(acc)
+                        or _naver_geocode(acc_title)
+                        or _naver_geocode(acc.get("address", ""))
+                    )
+                    if acc_coord and acc_title:
+                        existing_idx = next(
+                            (i for i, (n, _) in enumerate(locations) if n == acc_title), None
+                        )
+                        if existing_idx is None:
+                            locations = [(acc_title, acc_coord)] + locations
+                            acc_idx_set = {0}
+                        else:
+                            acc_idx_set = {existing_idx}
+
+                map_html = _make_naver_map_html(locations, acc_indices=acc_idx_set)
                 components.html(map_html, height=520)
 
                 if locations:
-                    st.caption(
-                        "  ".join(f"**{i+1}.** {name}" for i, (name, _) in enumerate(locations))
-                    )
+                    parts = []
+                    for i, (name, _) in enumerate(locations):
+                        if i in acc_idx_set:
+                            parts.append(f"🏨 **{name}**")
+                        else:
+                            parts.append(f"**{i+1}.** {name}")
+                    st.caption("  ".join(parts))
 
 
 # ── 경비 렌더링 ──────────────────────────────────────────────────────
