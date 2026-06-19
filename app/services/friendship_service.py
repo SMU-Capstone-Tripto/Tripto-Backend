@@ -184,7 +184,7 @@ async def remove_friend(
 ) -> None:
     result = await db.execute(
         select(Friendship).where(
-            Friendship.id == friendship_id,
+            Friendship.friendship_id == friendship_id,
             or_(
                 Friendship.requester_id == current_user.user_id,
                 Friendship.addressee_id == current_user.user_id,
