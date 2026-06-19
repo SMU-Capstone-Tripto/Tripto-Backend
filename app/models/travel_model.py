@@ -14,6 +14,7 @@ class Travel(Base, TimestampMixin):
     destination = Column(String(100), nullable=False, comment="목적지 (예: 제주도, 파리)")
     start_date = Column(Date, nullable=False, comment="여행 시작일")
     end_date = Column(Date, nullable=False, comment="여행 종료일")
+    share_token = Column(String(36), unique=True, nullable=True, index=True, comment="공개 공유 토큰 (UUID)")
 
     owner = relationship("User", foreign_keys=[owner_id])
     schedules = relationship(
