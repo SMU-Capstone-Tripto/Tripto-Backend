@@ -4,7 +4,7 @@ from fastapi import HTTPException, status
 import httpx
 
 from app.models.user_model import User, AuthProvider
-from app.schemas.auth_schema import RegisterRequest, LoginRequest, PasswordChangeRequest
+from app.schemas.auth_schema import PasswordResetRequest, RegisterRequest, LoginRequest, PasswordChangeRequest
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token
 from app.core.unique_id import generate_unique_id
 from app.core.config import settings
@@ -217,16 +217,26 @@ async def google_login(code: str, db: AsyncSession) -> dict:
         "token_type": "bearer",
     }
 
+# 비밀번호 변경(로그인 환경)
 async def change_user_password(
     db: AsyncSession,
+    redis: aioredis.Redis,
     current_user: User,
     data: PasswordChangeRequest
+    
 ) -> None:
     # 소셜 로그인 유저는 자체 비밀번호가 없으므로 차단
     if current_user.auth_provider != AuthProvider.LOCAL or not current_user.hashed_password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="소셜 로그인 계정은 비밀번호를 변경할 수 없습니다."
+        )
+    # 이메일 인증 코드 검증 
+    is_valid = await verify_email_code(redis, current_user.email, data.verification_code)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="이메일 인증 코드가 올바르지 않거나 만료되었습니다."
         )
     # 현재 비밀번호 검증
     if not verify_password(data.old_password, current_user.hashed_password):
@@ -243,3 +253,36 @@ async def change_user_password(
     # 새 비밀번호 해싱 및 저장
     current_user.hashed_password = hash_password(data.new_password)
     await db.flush()
+
+# 비밀번호 변경(비로그인 환경)
+async def reset_user_password(db: AsyncSession, redis_client, data: PasswordResetRequest):
+    # 이메일 인증 코드 검증
+    is_valid = await verify_email_code(redis_client, data.email, data.verification_code)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="이메일 인증 코드가 올바르지 않거나 만료되었습니다."
+        )
+
+    # 유저 존재 여부 확인
+    result = await db.execute(select(User).where(User.email == data.email))
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="가입되지 않은 이메일입니다."
+        )
+
+    # 소셜 로그인 유저 예외 처리 
+    if user.auth_provider != AuthProvider.LOCAL:  # 프로젝트의 Enum이나 상수 값에 맞게 수정하세요
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"해당 계정은 {user.auth_provider} 연동 계정입니다. 소셜 로그인을 이용해주세요."
+        )
+
+    # 새 비밀번호 해싱 후 업데이트
+    user.hashed_password = hash_password(data.new_password)
+    
+    # db.add(user) # SQLAlchemy 버전에 따라 생략 가능
+    await db.flush() # 영속성 컨텍스트 반영
