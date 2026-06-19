@@ -2,7 +2,7 @@ from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime
 from app.models.user_model import AuthProvider
-
+import re
 
 # ── 회원가입 ──────────────────────────────────────────────
 class RegisterRequest(BaseModel):
@@ -15,8 +15,13 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("비밀번호는 최소 8자 이상이어야 합니다.")
+        password_regex = re.compile( # 비밀번호 검증 정규식(영문 대소문자 + 특수문자 혼합 8자 이상)
+            r"^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$"
+        )
+        if not password_regex.match(v):
+            raise ValueError(
+                "비밀번호는 영문 대소문자, 숫자, 특수문자(@$!%*?&)를 포함하여 최소 8자 이상이어야 합니다."
+            )
         return v
 
     @field_validator("nickname")
@@ -83,7 +88,22 @@ class UserResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
-
 class UserUpdateRequest(BaseModel):
     nickname: Optional[str] = None
     tags: Optional[List[str]] = None
+
+class PasswordChangeRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        password_regex = re.compile(
+            r"^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$"
+        )
+        if not password_regex.match(v):
+            raise ValueError(
+                "새 비밀번호는 영문 대소문자, 숫자, 특수문자(@$!%*?&)를 포함하여 최소 8자 이상이어야 합니다."
+            )
+        return v
