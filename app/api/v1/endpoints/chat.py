@@ -1,3 +1,5 @@
+from typing import List
+
 from fastapi import APIRouter, Depends, File, Query, UploadFile, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +12,7 @@ from app.services import chat_service
 
 router = APIRouter(prefix="/chat", tags=["채팅"])
 
+# 채팅방 생성 API
 @router.post("/rooms", response_model=ChatRoomResponse, summary="채팅방 생성")
 async def create_room(
     body: ChatRoomCreate,
@@ -21,6 +24,16 @@ async def create_room(
     )
     return room
 
+# 채팅방 목록 조회 API
+@router.get("/rooms", response_model=List[ChatRoomResponse], summary="자신이 속한 채팅방 목록 조회")
+async def get_my_rooms(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user)
+):
+    rooms = await chat_service.get_user_rooms(db, current_user.user_id)
+    return rooms
+
+# 멤버 초대 API
 @router.post("/{room_id}/invite", summary="방장이 사용자 초대")
 async def invite_to_room(
     room_id: int,
@@ -31,28 +44,7 @@ async def invite_to_room(
     await chat_service.invite_users(db, room_id, current_user.user_id, body.invited_user_ids)
     return {"message": "사용자가 성공적으로 초대되었습니다."}
 
-@router.post("/{room_id}/image", summary="사진 전송")
-async def send_image(
-    room_id: int,
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_db)
-):
-    # 이미지 저장
-    # file_url = await upload_to_s3(file) 
-    file_url = "https://example.com/uploaded_image.jpg" 
-    
-    # DB에 메시지 저장
-    message = ChatMessage(
-        room_id=room_id,
-        sender_id=current_user.user_id,
-        content=file_url,
-        message_type="image"
-    )
-    db.add(message)
-    await db.commit()
-    return {"message": "사진이 전송되었습니다.", "url": file_url}
-
+# 채팅 기록 조회 API
 @router.get("/{room_id}/messages", summary="메시지 조회")
 async def get_messages(room_id: int, db: AsyncSession = Depends(get_async_db)):
     # DB에서 해당 방의 대화 기록 조회
@@ -61,11 +53,11 @@ async def get_messages(room_id: int, db: AsyncSession = Depends(get_async_db)):
     )
     return result.scalars().all()
 
+# 채팅방 나가기 API
 @router.delete("/{room_id}/leave", summary="채팅방 나가기")
 async def leave_room(
     room_id: int, 
     db: AsyncSession = Depends(get_async_db),
-    # 여기서 user_id를 쿼리로 받거나, 나중에 토큰으로 대체하세요
     user_id: int = Query(...) 
 ):
     await chat_service.leave_room(db, room_id, user_id)
