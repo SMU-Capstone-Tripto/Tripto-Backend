@@ -49,7 +49,7 @@ async def get_shared_travel(db: AsyncSession, token: str) -> dict:
             "date": str(schedules[0].date),
             "schedules": [
                 ScheduleDetailResponse.model_validate(s).model_dump()
-                for s in sorted(schedules, key=lambda s: s.order_index)
+                for s in schedules # 중복 정렬 제거 
             ],
         }
         for day_num, schedules in sorted(days_dict.items())
