@@ -10,7 +10,7 @@ from app.schemas.travel_schema import TravelCreate, TravelUpdate
 
 
 async def create_travel(db: AsyncSession, data: TravelCreate, owner_id: int) -> Travel:
-    travel_data = data.model_dump(exclude={"travel_id"})  # travel_id 제외
+    travel_data = data.model_dump() 
     travel_data["owner_id"] = owner_id
     travel = Travel(**travel_data)
     db.add(travel)
@@ -33,14 +33,15 @@ async def get_travels_by_owner(db: AsyncSession, owner_id: int) -> List[Travel]:
     return list(result.scalars().all())
 
 
-async def update_travel(
-    db: AsyncSession, travel_id: int, data: TravelUpdate, owner_id: int
-) -> Optional[Travel]:
-    travel = await get_travel(db, travel_id)
-    if not travel:
-        return None
-    if travel.owner_id != owner_id:
-        raise HTTPException(status_code=403, detail="자신의 여행/일정만 수정할 수 있습니다.")
+async def update_travel(db: AsyncSession, travel_id: int, data: TravelUpdate, owner_id: int):
+    result = await db.execute(
+        select(Travel).where(Travel.travel_id == travel_id, Travel.owner_id == owner_id)
+    )
+    travel = result.scalar_one_or_none()
+    
+    if not travel: # 여행이 없거나 내 여행이 아닌 경우 
+        raise HTTPException(status_code=404, detail="여행을 찾을 수 없거나 권한이 없습니다.")
+        
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(travel, field, value)
     await db.flush()
