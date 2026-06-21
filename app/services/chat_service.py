@@ -19,6 +19,7 @@ async def create_room(db: AsyncSession, owner_id: int, invited_ids: List[int], r
     await db.refresh(new_room)
     return new_room
 
+# 채팅 기록 조회 
 async def get_messages(db: AsyncSession, room_id: int) -> List[ChatMessage]:
     result = await db.execute(
         select(ChatMessage).where(ChatMessage.room_id == room_id).order_by(ChatMessage.created_at)
@@ -81,6 +82,16 @@ async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: 
     db.add(new_message)
     await db.commit()
     await db.refresh(new_message)
+
+# 사용자가 속한 채팅방 목록 조회
+async def get_user_rooms(db: AsyncSession, user_id: int) -> List[ChatRoom]:
+    result = await db.execute(
+        select(ChatRoom)
+        .join(ChatRoomMember, ChatRoom.room_id == ChatRoomMember.room_id)
+        .where(ChatRoomMember.user_id == user_id)
+        .order_by(ChatRoom.created_at.desc()) 
+    )
+    return result.scalars().all()
 
 class ConnectionManager:
     def __init__(self):

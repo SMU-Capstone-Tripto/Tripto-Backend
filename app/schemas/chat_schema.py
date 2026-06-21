@@ -18,6 +18,8 @@ class ChatMessageResponse(BaseModel):
 class ChatRoomResponse(BaseModel):
     room_id: int
     room_name: Optional[str] = None
+    owner_id: int  
+    member_ids: List[int] = []  
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
