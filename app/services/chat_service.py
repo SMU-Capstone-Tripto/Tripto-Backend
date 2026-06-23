@@ -93,6 +93,24 @@ async def get_user_rooms(db: AsyncSession, user_id: int) -> List[ChatRoom]:
     )
     return result.scalars().all()
 
+#사용자가 어디까지 읽었는지 DB에 업데이트
+async def update_last_read(db: AsyncSession, room_id: int, user_id: int, message_id: int) -> bool:
+    result = await db.execute(
+        select(ChatRoomMember).where(
+            ChatRoomMember.room_id == room_id,
+            ChatRoomMember.user_id == user_id
+        )
+    )
+    member = result.scalar_one_or_none()
+    
+    # 최신 메시지를 읽었을 때만 덮어씌움 
+    if member and (member.last_read_message_id is None or member.last_read_message_id < message_id):
+        member.last_read_message_id = message_id
+        await db.commit()
+        return True
+        
+    return False
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[int, List[WebSocket]] = {}
