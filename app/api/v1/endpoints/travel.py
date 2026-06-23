@@ -1,5 +1,4 @@
 from typing import List
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -62,16 +61,20 @@ async def delete_travel(
         raise HTTPException(status_code=404, detail="여행을 찾을 수 없습니다.")
 
 
-@router.get("", response_model=List[TravelResponse], summary="여행 리스트 조회")
+@router.get("", response_model=List[TravelResponse], summary="내 여행 리스트 조회")
 async def list_travels(
-    owner_id: int = Query(..., description="여행 소유자 ID(로그인 연동 전)"),
     db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user), # 토큰 기반으로 내 여행만 조회
 ):
-    return await travel_service.get_travels_by_owner(db, owner_id)
+    return await travel_service.get_travels_by_owner(db, current_user.user_id)
 
 @router.get("/{travel_id}/map", response_model=List[ScheduleMapPin], summary="여행장소 지도 Pin")
-async def get_map_pins(travel_id: int, db: AsyncSession = Depends(get_async_db)):
-    travel = await travel_service.get_travel(db, travel_id)
-    if not travel:
-        raise HTTPException(status_code=404, detail="여행을 찾을 수 없습니다.")
-    return await schedule_service.get_map_pins(db, travel_id)
+async def get_map_pins(
+    travel_id: int, 
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user)
+):
+    pins = await schedule_service.get_map_pins(db, travel_id)
+    if not pins:
+        return []
+    return pins

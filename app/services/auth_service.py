@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.services.email_service import verify_email_code
 import redis.asyncio as aioredis
 
+http_client = httpx.AsyncClient(timeout=10.0)
 
 # ── 자체 회원가입 ──────────────────────────────────────────
 async def register_user(
@@ -126,37 +127,33 @@ async def _get_or_create_social_user(
 
 # ── 카카오 OAuth ───────────────────────────────────────────
 async def kakao_login(code: str, db: AsyncSession) -> dict:
-    async with httpx.AsyncClient() as client:
-        # 1. 인가 코드 → 액세스 토큰
-        token_res = await client.post(
-            "https://kauth.kakao.com/oauth/token",
-            data={
-                "grant_type": "authorization_code",
-                "client_id": settings.KAKAO_CLIENT_ID,
-                "redirect_uri": settings.KAKAO_REDIRECT_URI,
-                "code": code,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        print(f"\n[요청 데이터] client_id={settings.KAKAO_CLIENT_ID!r} redirect_uri={settings.KAKAO_REDIRECT_URI!r} code={code!r}\n")
-        print(f"\n[카카오 토큰] status={token_res.status_code} body={token_res.text}\n")
-        print(f"\n[카카오 토큰] status={token_res.status_code} body={token_res.text}\n")
-        if token_res.status_code != 200:
-            raise HTTPException(status_code=400, detail="카카오 토큰 발급 실패")
+    
+    token_res = await http_client.post(
+        "https://kauth.kakao.com/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": settings.KAKAO_CLIENT_ID,
+            "redirect_uri": settings.KAKAO_REDIRECT_URI,
+            "code": code,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    
+    if token_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="카카오 토큰 발급 실패")
 
-        kakao_token = token_res.json()
-        access_token = kakao_token["access_token"]
+    kakao_token = token_res.json()
+    access_token = kakao_token["access_token"]
 
-        # 2. 액세스 토큰 → 사용자 정보
-        user_res = await client.get(
-            "https://kapi.kakao.com/v2/user/me",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        print(f"\n[카카오 유저] status={user_res.status_code} body={user_res.text}\n")
-        if user_res.status_code != 200:
-            raise HTTPException(status_code=400, detail="카카오 사용자 정보 조회 실패")
+    user_res = await http_client.get(
+        "https://kapi.kakao.com/v2/user/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    
+    if user_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="카카오 사용자 정보 조회 실패")
 
-        kakao_user = user_res.json()
+    kakao_user = user_res.json()
 
     kakao_account = kakao_user.get("kakao_account", {})
     profile = kakao_account.get("profile", {})
@@ -178,30 +175,30 @@ async def kakao_login(code: str, db: AsyncSession) -> dict:
 
 # ── 구글 OAuth ─────────────────────────────────────────────
 async def google_login(code: str, db: AsyncSession) -> dict:
-    async with httpx.AsyncClient() as client:
-        # 1. 인가 코드 → 토큰
-        token_res = await client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "code": code,
-                "client_id": settings.GOOGLE_CLIENT_ID,
-                "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code",
-            },
-        )
-        if token_res.status_code != 200:
-            raise HTTPException(status_code=400, detail="구글 토큰 발급 실패")
-        google_token = token_res.json()
+    
+    token_res = await http_client.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        },
+    )
+    
+    if token_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="구글 토큰 발급 실패")
+    google_token = token_res.json()
 
-        # 2. 토큰 → 사용자 정보
-        user_res = await client.get(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {google_token['access_token']}"},
-        )
-        if user_res.status_code != 200:
-            raise HTTPException(status_code=400, detail="구글 사용자 정보 조회 실패")
-        google_user = user_res.json()
+    user_res = await http_client.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {google_token['access_token']}"},
+    )
+    
+    if user_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="구글 사용자 정보 조회 실패")
+    google_user = user_res.json()
 
     email = google_user["email"]
     nickname = google_user.get("name", email.split("@")[0])
