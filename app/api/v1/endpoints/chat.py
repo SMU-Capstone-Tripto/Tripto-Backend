@@ -1,6 +1,7 @@
+import json
 from typing import List
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_async_db
@@ -77,8 +78,40 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = 
     try:
         while True:
             data = await websocket.receive_text()
-            print(f"DEBUG: 방 {room_id} 메시지 - {data}")
-            await chat_service.save_message(db, room_id, user_id, data)
-            await chat_service.manager.broadcast(room_id, f"User {user_id}: {data}")
+            
+            try:
+                payload = json.loads(data)
+                action = payload.get("action")
+
+                # 새로운 메시지를 전송한 경우 
+                if action == "send_message":
+                    content = payload.get("content")
+                    # DB에 메시지 저장
+                    new_msg = await chat_service.save_message(db, room_id, user_id, content)
+                    # 보낸 사람은 자동으로 읽음 처리
+                    await chat_service.update_last_read(db, room_id, user_id, new_msg.message_id)
+                    await chat_service.manager.broadcast(room_id, json.dumps({
+                        "type": "new_message",
+                        "message_id": new_msg.message_id,
+                        "sender_id": user_id,
+                        "content": content
+                    }))
+                
+                # 메시지를 새로 읽은 경우 
+                elif action == "read_message":
+                    message_id = payload.get("message_id")
+                    
+                    # DB 업데이트
+                    updated = await chat_service.update_last_read(db, room_id, user_id, message_id)
+                    if updated:
+                        await chat_service.manager.broadcast(room_id, json.dumps({
+                            "type": "read_update",
+                            "user_id": user_id,
+                            "last_read_message_id": message_id
+                        }))
+
+            except json.JSONDecodeError:
+                print("잘못된 JSON 형식의 데이터가 수신됨")
+
     except WebSocketDisconnect:
         chat_service.manager.disconnect(room_id, websocket)
