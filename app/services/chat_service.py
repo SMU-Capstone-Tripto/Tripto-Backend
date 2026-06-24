@@ -77,11 +77,12 @@ async def leave_room(db: AsyncSession, room_id: int, user_id: int):
     await manager.broadcast(room_id, f"User {user_id}님이 퇴장했습니다.")
   
 # DB에 메시지 저장 
-async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: str):
-    new_message = ChatMessage(room_id=room_id, sender_id=sender_id, content=content)
+async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: str, message_type: str = "text"):
+    new_message = ChatMessage(room_id=room_id, sender_id=sender_id, content=content, message_type=message_type)
     db.add(new_message)
     await db.commit()
     await db.refresh(new_message)
+    return new_message
 
 # 사용자가 속한 채팅방 목록 조회
 async def get_user_rooms(db: AsyncSession, user_id: int) -> List[ChatRoom]:
