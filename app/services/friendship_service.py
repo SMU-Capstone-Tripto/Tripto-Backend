@@ -175,6 +175,22 @@ async def get_friend_list(
         )
     return items
 
+# 수락된 친구 목록만 빠르게 추출 
+async def get_accepted_friend_ids(user_id: int, db: AsyncSession) -> list[int]:
+    result = await db.execute(
+        select(Friendship).where(
+            or_(
+                Friendship.requester_id == user_id,
+                Friendship.addressee_id == user_id,
+            ),
+            Friendship.status == FriendshipStatus.ACCEPTED,
+        )
+    )
+    friendships = result.scalars().all()
+    return [
+        f.addressee_id if f.requester_id == user_id else f.requester_id
+        for f in friendships
+    ]
 
 # ── 친구 삭제 ─────────────────────────────────────────────
 async def remove_friend(
@@ -184,7 +200,7 @@ async def remove_friend(
 ) -> None:
     result = await db.execute(
         select(Friendship).where(
-            Friendship.id == friendship_id,
+            Friendship.friendship_id == friendship_id,
             or_(
                 Friendship.requester_id == current_user.user_id,
                 Friendship.addressee_id == current_user.user_id,

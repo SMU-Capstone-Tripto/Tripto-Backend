@@ -15,6 +15,7 @@ from app.core.security import (
 from app.core.config import settings
 from app.models.user_model import User
 from app.schemas.auth_schema import (
+    PasswordResetRequest,
     RegisterRequest,
     LoginRequest,
     TokenResponse,
@@ -25,7 +26,14 @@ from app.schemas.auth_schema import (
     UserUpdateRequest,
     PasswordChangeRequest,
 )
-from app.services.auth_service import register_user, login_user, kakao_login, google_login, change_user_password
+from app.services.auth_service import (
+    register_user, 
+    login_user, 
+    kakao_login, 
+    google_login, 
+    change_user_password, 
+    reset_user_password
+)
 from app.services.email_service import (
     generate_verification_code,
     send_verification_email,
@@ -182,8 +190,19 @@ async def google_callback(code: str, db: AsyncSession = Depends(get_async_db)):
 @router.patch("/password", summary="비밀번호 변경")
 async def change_password(
     body: PasswordChangeRequest,
+    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    await change_user_password(db, current_user, body)
+    await change_user_password(db, redis, current_user, body)
     return {"message": "비밀번호 변경이 완료되었습니다."}
+
+# 비밀번호 초기화(잊은 경우)
+@router.post("/password/reset", summary="비밀번호 잊음 - 이메일 인증 후 재설정")
+async def reset_password(
+    body: PasswordResetRequest,
+    db: AsyncSession = Depends(get_async_db),
+    redis_client = Depends(get_redis) # Redis를 쓰고 계시다면 주입
+):
+    await reset_user_password(db, redis_client, body)
+    return {"message": "비밀번호가 성공적으로 초기화되었습니다. 새 비밀번호로 로그인해 주세요."}
