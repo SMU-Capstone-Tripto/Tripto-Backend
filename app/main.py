@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
@@ -42,6 +43,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 정적 파일 마운트 설정 
+app.mount("/static", StaticFiles(directory="static"), name="static")
 # 라우터 등록
 app.include_router(api_router)
 
