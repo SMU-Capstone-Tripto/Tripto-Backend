@@ -67,9 +67,7 @@ async def send_friend_request(
         if rel.status == FriendshipStatus.ACCEPTED:
             raise HTTPException(status_code=409, detail="이미 친구입니다.")
         if rel.status == FriendshipStatus.PENDING:
-            raise HTTPException(status_code=409, detail="이미 친구 요청이 전송되었습니다.")
-        if rel.status == FriendshipStatus.BLOCKED:
-            raise HTTPException(status_code=403, detail="차단된 사용자입니다.")
+            raise HTTPException(status_code=409, detail="이미 대기 중인 친구 신청이 있습니다.")
 
     friendship = Friendship(
         requester_id=current_user.user_id,
@@ -108,41 +106,36 @@ async def get_received_requests(
 
 # ── 친구 요청 수락/거절 ───────────────────────────────────
 async def respond_to_friend_request(
-    friendship_id: int,
-    action: str,  # "accept" or "reject"
-    current_user: User,
-    db: AsyncSession,
-) -> FriendRequestResponse:
+    db: AsyncSession, 
+    friendship_id: int, 
+    is_accept: bool, 
+    current_user_id: int
+):
+    # 친구 신청 내역 조회
     result = await db.execute(
-        select(Friendship)
-        .options(joinedload(Friendship.requester), joinedload(Friendship.addressee))
-        .where(
+        select(Friendship).where(
             Friendship.friendship_id == friendship_id,
-            Friendship.addressee_id == current_user.user_id,
-            Friendship.status == FriendshipStatus.PENDING,
+            Friendship.addressee_id == current_user_id,
+            Friendship.status == FriendshipStatus.PENDING  # 대기 중인 신청만 처리 가능
         )
     )
     friendship = result.scalar_one_or_none()
 
     if not friendship:
-        raise HTTPException(status_code=404, detail="친구 요청을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="존재하지 않거나 이미 처리된 친구 신청입니다.")
 
-    if action == "accept":
+    if is_accept: # 수락
         friendship.status = FriendshipStatus.ACCEPTED
-    elif action == "reject":
-        friendship.status = FriendshipStatus.REJECTED
-    else:
-        raise HTTPException(status_code=400, detail="action은 'accept' 또는 'reject'여야 합니다.")
-
-    await db.flush()
-
-    result = await db.execute(
-        select(Friendship)
-        .options(joinedload(Friendship.requester), joinedload(Friendship.addressee))
-        .where(Friendship.friendship_id == friendship.friendship_id)
-    )
-    friendship = result.scalar_one()
-    return FriendRequestResponse.from_friendship(friendship)
+        message = "친구 신청 수락"
+    else: # 거절
+        await db.delete(friendship)
+        message = "친구 신청 거절"
+    await db.commit()
+    
+    if is_accept:
+        await db.refresh(friendship)
+        
+    return {"message": message}
 
 
 # ── 친구 목록 보기 ────────────────────────────────────────
