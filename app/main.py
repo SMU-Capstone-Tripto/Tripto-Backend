@@ -8,7 +8,7 @@ from app.api.v1.endpoints import api_router
 from app.infra.redis_client import init_redis, close_redis
 from app.core.database import async_engine as engine
 from app.models.base import Base
-from app.models import User, Friendship, Travel, Schedule, Memo, ChatRoom, ChatMessage, ChatRoomMember  # noqa: F401
+from app.models import User, Friendship, Travel, Schedule, Memo, ChatRoom, ChatMessage, ChatRoomMember, Notification  # noqa: F401
 
 
 @asynccontextmanager
