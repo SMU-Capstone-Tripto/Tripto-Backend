@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from app.models.user_model import User
 from app.models.friendship_model import Friendship, FriendshipStatus
 from app.schemas.friendship_schema import FriendListItem, FriendSearchResponse, FriendRequestResponse
+from app.services import notification_service
 
 
 # ── ID로 사용자 검색 ──────────────────────────────────────
@@ -84,6 +85,14 @@ async def send_friend_request(
         .where(Friendship.friendship_id == friendship.friendship_id)
     )
     friendship = result.scalar_one()
+
+    await notification_service.notify_friend_request(
+        db=db,
+        recipient_id=target.user_id,
+        actor_id=current_user.user_id,
+        actor_nickname=current_user.nickname,
+    )
+
     return FriendRequestResponse.from_friendship(friendship)
 
 
@@ -131,10 +140,19 @@ async def respond_to_friend_request(
         await db.delete(friendship)
         message = "친구 신청 거절"
     await db.commit()
-    
+
     if is_accept:
         await db.refresh(friendship)
-        
+        actor_result = await db.execute(select(User).where(User.user_id == current_user_id))
+        actor = actor_result.scalar_one_or_none()
+        if actor:
+            await notification_service.notify_friend_accepted(
+                db=db,
+                recipient_id=friendship.requester_id,
+                actor_id=current_user_id,
+                actor_nickname=actor.nickname,
+            )
+
     return {"message": message}
 
 
