@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
@@ -7,7 +8,7 @@ from app.api.v1.endpoints import api_router
 from app.infra.redis_client import init_redis, close_redis
 from app.core.database import async_engine as engine
 from app.models.base import Base
-from app.models import User, Friendship, Travel, Schedule, Memo, ChatRoom, ChatMessage, ChatRoomMember  # noqa: F401
+from app.models import User, Friendship, Travel, Schedule, Memo, ChatRoom, ChatMessage, ChatRoomMember, Notification  # noqa: F401
 
 
 @asynccontextmanager
@@ -42,6 +43,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 정적 파일 마운트 설정 
+app.mount("/static", StaticFiles(directory="static"), name="static")
 # 라우터 등록
 app.include_router(api_router)
 

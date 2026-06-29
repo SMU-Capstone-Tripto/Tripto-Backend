@@ -43,6 +43,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - upload_data:/app/static/uploads
     command: >
       sh -c "python -m alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -50,3 +52,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  upload_data:
