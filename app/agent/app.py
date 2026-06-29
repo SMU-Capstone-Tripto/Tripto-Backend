@@ -66,12 +66,19 @@ def _parse_coord(item: dict) -> tuple[float, float] | None:
 def _build_coord_lookup(result: dict) -> dict[str, tuple[float, float]]:
     """장소명 → (lat, lon)"""
     lookup = {}
-    for key in ("tourist_spots", "restaurants", "cafes", "accommodations"):
+    for key in ("tourist_spots", "restaurants", "cafes"):
         for item in (result.get(key) or []):
             title = item.get("title", "")
             coord = _parse_coord(item)
             if title and coord:
                 lookup[title] = coord
+    # 숙소는 selected_acc만 지도에 표시
+    selected_acc = result.get("selected_acc")
+    if selected_acc:
+        coord = _parse_coord(selected_acc)
+        title = selected_acc.get("title", "")
+        if title and coord:
+            lookup[title] = coord
     return lookup
 
 
@@ -342,9 +349,8 @@ def _render_itinerary_tabs(itinerary: list[str], result: dict):
                 locations = _extract_day_locations(schedule_lines, coord_lookup)
 
                 acc_idx_set: set[int] = set()
-                acc_list = result.get("accommodations") or []
-                if acc_list:
-                    acc       = acc_list[0]
+                acc = result.get("selected_acc") or (result.get("accommodations") or [None])[0]
+                if acc:
                     acc_title = acc.get("title", "")
                     acc_coord = (
                         coord_lookup.get(acc_title)
@@ -431,6 +437,85 @@ def _render_cost(cost: dict, num_people: int):
         st.success(f"예산 {budget:,}원 이내입니다.", icon="✅")
 
 
+# ── 숙소 카드 ────────────────────────────────────────────────────────
+
+def _render_accommodation_card(result: dict):
+    selected_acc     = result.get("selected_acc")
+    room_combination = result.get("room_combination") or []
+    num_people       = result.get("num_people") or 1
+
+    if not selected_acc:
+        return
+
+    # 박수 계산
+    try:
+        start_str, end_str = result.get("traveldates", "").split("~")
+        from datetime import datetime as _dt
+        num_nights = (_dt.strptime(end_str.strip(), "%Y-%m-%d") -
+                      _dt.strptime(start_str.strip(), "%Y-%m-%d")).days
+    except Exception:
+        num_nights = 1
+
+    title   = selected_acc.get("title", "숙소")
+    address = selected_acc.get("address", "")
+    tel     = selected_acc.get("tel", "")
+    image   = selected_acc.get("firstimage") or selected_acc.get("image", "")
+
+    with st.expander(f"🏨 숙소 안내 — {title}", expanded=False):
+        col_img, col_info = st.columns([1, 2], gap="large")
+
+        with col_img:
+            if image:
+                st.image(image, use_container_width=True)
+            else:
+                st.markdown(
+                    "<div style='background:#f3f4f6;border-radius:8px;height:140px;"
+                    "display:flex;align-items:center;justify-content:center;"
+                    "color:#9ca3af;font-size:2rem;'>🏨</div>",
+                    unsafe_allow_html=True,
+                )
+
+        with col_info:
+            st.markdown(f"**{title}**")
+            if address:
+                st.markdown(f"📍 {address}")
+            if tel:
+                st.markdown(f"📞 {tel}")
+
+        if room_combination:
+            st.divider()
+            st.markdown(f"**추천 방 구성** ({num_people}명 기준)")
+
+            total_per_night = 0
+            for item in room_combination:
+                room      = item["room"]
+                count     = item["count"]
+                price     = item["price_per_night"]
+                subtotal  = price * count
+                total_per_night += subtotal
+                cap       = room.get("max_capacity", 0)
+                base      = room.get("base_capacity", 0)
+                st.markdown(
+                    f"- **{room.get('room_name', '객실')}** × {count}개 &nbsp;"
+                    f"<span style='color:#6b7280;font-size:0.85rem;'>"
+                    f"(기준 {base}인 / 최대 {cap}인 | {price:,}원/박)</span> "
+                    f"→ **{subtotal:,}원/박**",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(
+                f"<div style='margin-top:8px;padding:10px 14px;background:#eff6ff;"
+                f"border-radius:8px;border-left:4px solid #2563eb;'>"
+                f"<span style='font-size:0.85rem;color:#6b7280;'>1박 합계</span><br>"
+                f"<span style='font-size:1.1rem;font-weight:700;color:#1d4ed8;'>"
+                f"{total_per_night:,}원</span>"
+                f"<span style='color:#9ca3af;font-size:0.85rem;margin-left:10px;'>"
+                f"× {num_nights}박 = {total_per_night * num_nights:,}원</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+
 # ── 최종 결과 ────────────────────────────────────────────────────────
 
 def _render_final_plan(result: dict):
@@ -438,6 +523,8 @@ def _render_final_plan(result: dict):
 
     st.caption("📅 일자별 일정")
     _render_itinerary_tabs(result.get("itinerary") or [], result)
+
+    _render_accommodation_card(result)
 
     cost = result.get("estimated_cost") or {}
     if cost:

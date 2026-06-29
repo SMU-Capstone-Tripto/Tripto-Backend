@@ -14,6 +14,169 @@ from state import TravelState
 load_dotenv()
 
 
+def _is_peak_season(traveldates: str) -> bool:
+    """여행 시작일이 성수기(여름 7/15~8/31, 겨울 12/20~1/10)인지 판단"""
+    try:
+        start_str = traveldates.split("~")[0].strip()
+        start = datetime.strptime(start_str, "%Y-%m-%d")
+        month, day = start.month, start.day
+        if (month == 7 and day >= 15) or month == 8:
+            return True
+        if (month == 12 and day >= 20) or (month == 1 and day <= 10):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _min_cost_for_group(rooms: list, num_people: int, price_fn) -> int:
+    """num_people을 수용하는 최저 비용 방 조합 계산 (DP)
+    dp[i] = i명을 수용하는 최저 비용
+    각 인원 i마다 모든 방 종류를 시도:
+        나머지 = max(0, i - 방수용인원)
+        dp[i] = min(dp[i], dp[나머지] + 이 방 가격)
+    """
+    options = [
+        (r.get("max_capacity", 0), price_fn(r))
+        for r in rooms
+        if r.get("max_capacity", 0) > 0 and price_fn(r) > 0
+    ]
+    if not options:
+        return 100000
+
+    INF = float("inf")
+    dp = [INF] * (num_people + 1)
+    dp[0] = 0
+
+    for i in range(1, num_people + 1):
+        for cap, price in options:
+            prev = max(0, i - cap)
+            if dp[prev] != INF and dp[prev] + price < dp[i]:
+                dp[i] = dp[prev] + price
+
+    if dp[num_people] != INF:
+        return int(dp[num_people])
+    max_cap = max(c for c, _ in options)
+    return 100000 * math.ceil(num_people / max_cap)
+
+
+def _get_room_combination(rooms: list, num_people: int, price_fn) -> list:
+    """DP 역추적으로 최적 방 조합 반환 [{room, count, price_per_night}, ...]"""
+    options = [
+        (r, r.get("max_capacity", 0), price_fn(r))
+        for r in rooms
+        if r.get("max_capacity", 0) > 0 and price_fn(r) > 0
+    ]
+    if not options:
+        return []
+
+    INF = float("inf")
+    dp     = [INF]  * (num_people + 1)
+    parent = [None] * (num_people + 1)
+    dp[0]  = 0
+
+    for i in range(1, num_people + 1):
+        for room, cap, price in options:
+            prev = max(0, i - cap)
+            if dp[prev] != INF and dp[prev] + price < dp[i]:
+                dp[i]     = dp[prev] + price
+                parent[i] = (room, cap, price)
+
+    if dp[num_people] == INF:
+        return []
+
+    counts: dict = {}
+    cur = num_people
+    while cur > 0 and parent[cur]:
+        room, cap, price = parent[cur]
+        key = room.get("room_name") or id(room)
+        if key not in counts:
+            counts[key] = {"room": room, "count": 0, "price_per_night": price}
+        counts[key]["count"] += 1
+        cur = max(0, cur - cap)
+
+    return list(counts.values())
+
+
+def _select_accommodation(
+    accommodations: list,
+    tourist_spots: list,
+    num_people: int,
+    is_peak: bool,
+    price_weight: float = 0.6,
+    distance_weight: float = 0.4,
+) -> dict | None:
+    """그룹 실비용(DP) + 관광지 중심 거리를 합산해 최적 숙소 선택"""
+    if not accommodations:
+        return None
+    if len(accommodations) == 1:
+        return accommodations[0]
+
+    def _room_price(room: dict) -> int:
+        if is_peak:
+            return room.get("peak_price") or room.get("min_price") or 0
+        return room.get("min_price") or 0
+
+    # 관광지 중심 좌표 계산
+    centroid = None
+    coords = []
+    for s in tourist_spots:
+        try:
+            lat = float(s.get("mapy") or 0)
+            lon = float(s.get("mapx") or 0)
+            if lat and lon:
+                coords.append((lat, lon))
+        except Exception:
+            pass
+    if coords:
+        centroid = (
+            sum(c[0] for c in coords) / len(coords),
+            sum(c[1] for c in coords) / len(coords),
+        )
+
+    def _group_cost(acc: dict) -> int:
+        rooms = acc.get("rooms", [])
+        suitable = [r for r in rooms if r.get("max_capacity", 0) >= num_people]
+        if suitable:
+            prices = [_room_price(r) for r in suitable if _room_price(r) > 0]
+            return min(prices) if prices else 100000
+        return _min_cost_for_group(rooms, num_people, _room_price) if rooms else 100000
+
+    def _distance_km(acc: dict) -> float:
+        if not centroid:
+            return 0.0
+        try:
+            lat = float(acc.get("mapy") or 0)
+            lon = float(acc.get("mapx") or 0)
+            if not lat or not lon:
+                return float("inf")
+            # 한국 위도 기준 근사값: 위도 1도 ≈ 111km, 경도 1도 ≈ 88km
+            dlat = (lat - centroid[0]) * 111
+            dlon = (lon - centroid[1]) * 88
+            return (dlat ** 2 + dlon ** 2) ** 0.5
+        except Exception:
+            return float("inf")
+
+    scored = [(acc, _group_cost(acc), _distance_km(acc)) for acc in accommodations]
+
+    costs = [s[1] for s in scored]
+    dists = [s[2] for s in scored if s[2] != float("inf")]
+
+    cost_min, cost_max = min(costs), max(costs)
+    dist_min = min(dists) if dists else 0
+    dist_max = max(dists) if dists else 1
+    cost_range = (cost_max - cost_min) or 1
+    dist_range  = (dist_max - dist_min) or 1
+
+    def _score(cost: int, dist: float) -> float:
+        norm_cost = (cost - cost_min) / cost_range
+        norm_dist = (dist - dist_min) / dist_range if dist != float("inf") else 1.0
+        return price_weight * norm_cost + distance_weight * norm_dist
+
+    scored.sort(key=lambda x: _score(x[1], x[2]))
+    return scored[0][0]
+
+
 class DailyPlan(BaseModel):
     day: int
     date: str
@@ -329,6 +492,19 @@ def _pick_cafe(day_spots: list, cafes: list, used: set) -> dict | None:
     return cafes[idx]
 
 
+def _fix_accommodation_name(itinerary: list, correct_name: str, all_acc_titles: list) -> list:
+    """LLM이 바꿔버린 숙소명을 selected_acc 이름으로 강제 교정"""
+    wrong_names = [t for t in all_acc_titles if t and t != correct_name]
+    if not wrong_names or not correct_name:
+        return itinerary
+    fixed = []
+    for day_text in itinerary:
+        for wrong in wrong_names:
+            day_text = day_text.replace(wrong, correct_name)
+        fixed.append(day_text)
+    return fixed
+
+
 def _build_skeletons(
     tourist_spots: list,
     restaurants: list,
@@ -348,8 +524,12 @@ def _build_skeletons(
         (skeleton_text, day_transits)
         day_transits[d]: d일차의 이동 줄 목록 — LLM이 누락해도 후처리로 강제 삽입
     """
-    acc_coord    = _parse_coord(accommodation) if accommodation else None
-    sorted_spots = _sort_nearest_neighbor(tourist_spots, start_coord=acc_coord)
+    acc_coord = _parse_coord(accommodation) if accommodation else None
+
+    # must_visit 장소를 앞으로 배치해 반드시 일정에 포함되도록 우선순위 부여
+    mv_spots    = [s for s in tourist_spots if s.get("must_visit")]
+    other_spots = [s for s in tourist_spots if not s.get("must_visit")]
+    sorted_spots = mv_spots + _sort_nearest_neighbor(other_spots, start_coord=acc_coord)
 
     # 관광지를 일자별로 배분
     spots_per_day: list[list] = []
@@ -404,8 +584,10 @@ def _build_skeletons(
         if breakfast:
             if prev:
                 _add_transit(prev, breakfast)
-            lines.append(f"   아침 식사 | {breakfast.get('title', '식당')} ({breakfast.get('address', '')})")
+            lines.append(f"   아침 식사 | {breakfast.get('title')} ({breakfast.get('address', '')})")
             prev = breakfast
+        else:
+            lines.append(f"   아침 식사 | 현지 식당 (직접 검색 추천)")
 
         # 오전 관광지
         for spot in morning_spots:
@@ -418,8 +600,10 @@ def _build_skeletons(
         if lunch:
             if prev:
                 _add_transit(prev, lunch)
-            lines.append(f"   점심 식사 | {lunch.get('title', '식당')} ({lunch.get('address', '')})")
+            lines.append(f"   점심 식사 | {lunch.get('title')} ({lunch.get('address', '')})")
             prev = lunch
+        else:
+            lines.append(f"   점심 식사 | 현지 식당 (직접 검색 추천)")
 
         # 오후 관광지
         for spot in afternoon_spots:
@@ -432,15 +616,19 @@ def _build_skeletons(
         if cafe:
             if prev:
                 _add_transit(prev, cafe)
-            lines.append(f"   카페 | {cafe.get('title', '카페')} ({cafe.get('address', '')})")
+            lines.append(f"   카페 | {cafe.get('title')} ({cafe.get('address', '')})")
             prev = cafe
+        else:
+            lines.append(f"   카페 | 현지 카페 (직접 검색 추천)")
 
         # 저녁 식사
         if dinner:
             if prev:
                 _add_transit(prev, dinner)
-            lines.append(f"   저녁 식사 | {dinner.get('title', '식당')} ({dinner.get('address', '')})")
+            lines.append(f"   저녁 식사 | {dinner.get('title')} ({dinner.get('address', '')})")
             prev = dinner
+        else:
+            lines.append(f"   저녁 식사 | 현지 식당 (직접 검색 추천)")
 
         # 마지막날이 아닌 경우: 저녁 식사 후 숙소 귀환
         if not is_last and not is_day_trip and accommodation:
@@ -450,7 +638,8 @@ def _build_skeletons(
 
         if is_last:
             if not is_day_trip:
-                lines.append("   숙소 체크아웃 (12:00 이전)")
+                acc_name = accommodation.get("title", "숙소") if accommodation else "숙소"
+                lines.append(f"   {acc_name} 체크아웃 (11:30)")
             lines.append("   귀환 교통편 [1일차와 동일 교통수단·등급, 편도 요금 명시]")
 
         parts.append("\n".join(lines))
@@ -486,6 +675,45 @@ def _is_intercity_event(line: str, origin: str, dest: str) -> bool:
             return True
 
     return False
+
+
+_ACTIVITY_DURATION: dict[str, int] = {
+    "관광": 90, "방문": 90, "탐방": 90, "투어": 90, "체험": 60,
+    "카페": 30, "디저트": 30,
+    "식사": 60, "아침": 60, "점심": 60, "저녁": 60, "브런치": 60,
+}
+
+_ACTIVITY_PATTERN = re.compile(
+    r"^(\d{2}:\d{2})\s+(관광|방문|탐방|투어|체험|카페|디저트|식사|아침|점심|저녁|브런치)(.*)"
+)
+
+
+def _normalize_schedule(lines: list[str]) -> list[str]:
+    """LLM 출력 형식 일괄 정규화.
+    1. HH:MM~HH:MM A→B  이동 줄 제거
+    2. HH:MM A→B        이동 줄 제거 (단일 시각)
+    3. HH:MM 활동       → HH:MM~HH:MM 활동 (종료 시간 추가)
+    """
+    result = []
+    for line in lines:
+        # 1. 범위 형식 이동 줄 제거
+        if re.match(r"^\d{2}:\d{2}~\d{2}:\d{2}\s+.*→", line):
+            continue
+        # 2. 단일 시각 이동 줄 제거
+        if re.match(r"^\d{2}:\d{2}\s+[^~]+→", line):
+            continue
+        # 3. 단일 시각 활동 → 시간 범위 변환
+        m = _ACTIVITY_PATTERN.match(line)
+        if m:
+            start, act, rest = m.group(1), m.group(2), m.group(3)
+            h, mn = map(int, start.split(":"))
+            dur = _ACTIVITY_DURATION.get(act, 60)
+            end_total = mn + dur
+            end_h = (h + end_total // 60) % 24
+            end_m = end_total % 60
+            line = f"{start}~{end_h:02d}:{end_m:02d} {act}{rest}"
+        result.append(line)
+    return result
 
 
 def _inject_transits(schedule: list[str], transits: list[str]) -> list[str]:
@@ -557,9 +785,10 @@ def Optimizer(state: TravelState) -> dict:
         cafes         = [c for c in cafes         if not _mentioned(c.get("title", ""))]
         tourist_spots = [t for t in tourist_spots if not _mentioned(t.get("title", ""))]
 
-    # 숙소 선택 (첫 번째 숙소 사용)
+    # 숙소 선택 (그룹 실비용 + 관광지 거리 점수 기반)
+    is_peak        = _is_peak_season(traveldates)
     accommodations = state.get("accommodations") or []
-    selected_acc   = accommodations[0] if accommodations else None
+    selected_acc   = _select_accommodation(accommodations, tourist_spots, num_people, is_peak)
 
     # 스켈레톤 사전 계산 (이동 정보 포함)
     skeletons, day_transits = _build_skeletons(
@@ -623,13 +852,18 @@ def Optimizer(state: TravelState) -> dict:
     # 2. 숙박비 계산
     accommodation_cost_total = 0
     if not is_day_trip:
+        def _room_price(room: dict) -> int:
+            if is_peak:
+                return room.get("peak_price") or room.get("min_price") or 0
+            return room.get("min_price") or 0
+
         if selected_acc:
-            rooms    = selected_acc.get("rooms", [])
-            suitable = [r for r in rooms if r.get("max_capacity", 0) >= num_people] or rooms
-            prices   = [r["min_price"] for r in suitable if r["min_price"] > 0]
-            min_room_price = min(prices) if prices else 100000
+            rooms = selected_acc.get("rooms", [])
+            min_room_price   = _min_cost_for_group(rooms, num_people, _room_price) if rooms else 100000
+            room_combination = _get_room_combination(rooms, num_people, _room_price)
         else:
-            min_room_price = 100000  # 숙소 검색 결과 없을 때 기본값 (성수기 1박 기준)
+            min_room_price   = 100000
+            room_combination = []
         accommodation_cost_total = min_room_price * (num_days - 1)
 
     # 3. 식비 고정 계산 (1인 1끼 15,000원 × 3끼 × 여행일수 × 인원수)
@@ -667,11 +901,13 @@ def Optimizer(state: TravelState) -> dict:
                            - 중복 방지: 같은 장소가 두 번 등장하면 나중 항목을 삭제하고 직전 장소 체류 연장으로 채울 것.
                            - [★중요] 2일차 이후 포함 모든 일차의 식당·관광지명은 반드시 스켈레톤에 명시된 고유 명칭을 그대로 사용할 것.
                              '식당', '근처 식당', '맛집', '관광지' 같은 일반 명칭 절대 금지. 스켈레톤에 없는 장소 임의 추가 금지.
+                             - 스켈레톤에 '현지 식당 (직접 검색 추천)' 또는 '현지 카페 (직접 검색 추천)'로 표시된 항목은 그 문구를 그대로 사용할 것. 임의의 식당명·카페명으로 교체 절대 금지.
                         2. schedule 항목은 세 종류:
                         ① 이벤트 항목 (단일 시각): "HH:MM [장소명] [도착/출발/귀환/체크인/체크아웃]"
                            - 장소에 처음 도착하거나 떠날 때 사용. 시간 범위 없음.
                         ② 활동 항목 (시간 범위): "HH:MM~HH:MM 활동내용 (장소명)"
                            - 관광·식사·카페 등 체류 활동. 반드시 시작~종료 시간 명시.
+                           - [★절대 금지] "HH:MM~HH:MM 이동 (버스)" 처럼 이동을 ② 활동 항목으로 표기 금지. 이동은 반드시 ③ 형식만 사용.
                         ③ 이동 항목 (타임스탬프 없음): "장소A → 장소B (대중교통 정보 / 택시 정보)"
                         ★ 이동 항목에 타임스탬프 절대 금지. 도착 시각은 ① 이벤트 항목으로 별도 표시.
                         
@@ -683,12 +919,15 @@ def Optimizer(state: TravelState) -> dict:
                         * 식사 시작 시각에 맞추기 위해 직전 관광 활동 종료 시각과 이동 시간을 조밀하게 계산할 것.
 
                         4. 활동별 표준 소요시간:
-                        - 관광지: 60~90분 / 식사: 60분 분량 고정 / 카페: 30분
+                        - 관광지: 60~90분 / 식사: 60분 고정 / 카페: 30분~2시간 (다음 식사 시작 전까지 체류 연장 가능)
+                        - 공백이 생기면 새 장소를 만들지 말고 카페·관광지 체류 시간을 연장해서 채울 것.
                         - 숙소 체크인: "HH:MM 숙소명 체크인" (15:00 고정) / 체크아웃: "HH:MM 숙소명 체크아웃" (11:30)
 
                         5. 시간 배정 원칙 (연속 흐름 — 공백 금지):
                         - 각 이벤트 시각 = 이전 활동 종료 시각 + 이동 소요시간. 30분 이상 공백 절대 금지.
-                        - 식사 고정 시각 사이에 비는 시간이 발생할 경우, 이전 장소 체류를 연장하거나 "자유 시간 / 산책 (장소명 인근)" 항목을 추가하여 시간을 촘촘하게 연결할 것.
+                        - 식사 고정 시각 사이에 비는 시간이 발생할 경우, 이전 장소 체류를 연장하여 시간을 촘촘하게 연결할 것.
+                        - "자유 시간" 항목은 하루 최대 1회만 허용. 두 번째부터는 이전 활동 체류 시간 연장으로 대체할 것.
+                        - "자유 시간" 장소는 반드시 스켈레톤에 있는 실제 관광지·카페 인근으로만 표기할 것.
 
                         6. 매일(마지막날 제외) 저녁 식사 후 반드시 숙소 귀환:
                         - "저녁식당 → 숙소명 (이동정보)" (③ 이동 항목)
@@ -744,13 +983,8 @@ def Optimizer(state: TravelState) -> dict:
         is_first = day_idx == 0
         is_last  = day_idx == num_days - 1
 
-        # ── _inject_transits 실행 전 LLM 불필요 줄 제거 ──────────────────
-        # (이후 제거하면 transit 슬롯이 잘못 배정돼 고아 transit 줄 발생)
-        raw = list(dp.schedule)
-
-        # ① LLM이 HH:MM~HH:MM 활동 형식으로 쓴 이동 줄 제거
-        #    예: "09:00~09:01 장소A → 장소B (도보 약 1분)"
-        raw = [l for l in raw if not re.match(r'^\d{2}:\d{2}~\d{2}:\d{2}\s+.*→', l)]
+        # ── _inject_transits 실행 전 LLM 출력 형식 정규화 ───────────────
+        raw = _normalize_schedule(list(dp.schedule))
 
         # ② 1일차: LLM이 생성한 광역 이동 줄(→) 및 단일 이벤트(도착/출발) 제거
         if is_first and origin_city:
@@ -777,17 +1011,24 @@ def Optimizer(state: TravelState) -> dict:
 
         itinerary.append(f"[{dp.day}일차 | {dp.date}]\n" + "\n".join(schedule))
 
+    # 숙소명 후처리: LLM이 바꾼 숙소명을 selected_acc로 강제 교정
+    if selected_acc and not is_day_trip:
+        acc_titles = [a.get("title", "") for a in accommodations]
+        itinerary = _fix_accommodation_name(itinerary, selected_acc.get("title", ""), acc_titles)
+
     return {
         "current_step": "optimized",
         "plan_title": plan.title,
         "itinerary": itinerary,
-        "itinerary_feedback": None,  # 처리 완료 후 초기화
+        "itinerary_feedback": None,
+        "selected_acc":      selected_acc,
+        "room_combination":  room_combination if not is_day_trip else [],
         "estimated_cost": {
             "transportation": transport_cost_total,
             "accommodation":  accommodation_cost_total,
             "meals":          meals_cost_total,
             "activities":     activities_cost_total,
             "total":          total_calculated,
-            "budget":         budget,  # 설정 예산 (비교용)
+            "budget":         budget,
         },
     }

@@ -8,7 +8,11 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _naver_api import geocode as _naver_geocode
 from state import TravelState
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from Optimizer import _normalize_schedule
 
 load_dotenv()
 
@@ -17,10 +21,11 @@ load_dotenv()
 
 class DayRequest(BaseModel):
     day: int                                     # 수정 일차 (1-based, 0=전체)
-    action: str                                  # area_change | remove | change | other
+    action: str                                  # area_change | add | remove | change | other
     target_area: Optional[str] = None            # area_change 시 이동할 지역명
     exclude_area: Optional[str] = None           # area_change 시 제외할 지역명
     excluded_places: Optional[List[str]] = None  # 삭제할 특정 장소명 목록
+    add_places: Optional[List[str]] = None       # 추가할 특정 장소명 목록 (add 액션)
     description: str = ""                        # LLM에 전달할 수정 지시문 (한국어)
 
 
@@ -80,6 +85,8 @@ def _parse_feedback(feedback: str, itinerary: list, num_days: int, llm) -> Revis
 [action 분류 기준]
 - area_change: 특정 일차의 방문 지역 자체를 다른 지역으로 변경
   예: "3일차 다대포 말고 부산역 근처로"
+- add: 특정 장소/관광지를 일정에 추가
+  예: "2일차에 송도해수욕장 추가해줘", "깡통시장 넣어줘"
 - remove: 특정 장소/카페/식당을 일정에서 삭제
   예: "조은느낌 라이브 삭제", "1일차 카페 빼줘"
 - change: 특정 장소를 다른 곳으로 교체
@@ -91,6 +98,7 @@ def _parse_feedback(feedback: str, itinerary: list, num_days: int, llm) -> Revis
 - target_area: 이동할 새 지역명 (area_change 시)
 - exclude_area: 제외할 기존 지역명 (area_change 시)
 - excluded_places: 해당 일차에서만 제거할 장소명 리스트
+- add_places: 추가할 장소명 리스트 (add 액션 시)
 - description: 수정 내용을 구체적으로 설명하는 한국어 지시문
 - global_excluded_places: 모든 일차에서 제거할 장소명 리스트 (전체 삭제 요청 시)
 
@@ -157,6 +165,22 @@ def _revise_day(
 {_fmt_spots(area_cafes)}
 """
 
+    elif req.action == "add" and req.add_places:
+        # 추가 요청된 장소를 Naver 지오코딩으로 검색해서 LLM에게 제공
+        city = state.get("city", "")
+        add_spot_lines = []
+        for place in req.add_places:
+            coord = _naver_geocode(f"{city} {place}") or _naver_geocode(place)
+            coord_str = f"({coord[0]:.4f}, {coord[1]:.4f})" if coord else "(좌표 미확인)"
+            add_spot_lines.append(f"  - {place} {coord_str}")
+        spots_section = f"""
+[추가 요청 장소 ★ 반드시 {day_num}일차 일정에 포함]
+{"".join(add_spot_lines)}
+
+[참고 가능 관광지]
+{_fmt_spots(tourist_spots, 4)}
+"""
+
     elif req.action in ("change", "other"):
         spots_section = f"""
 [참고 가능 관광지 (일부)]
@@ -211,7 +235,8 @@ def _revise_day(
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"{day_num}일차를 위 요청대로 수정해줘."),
         ])
-        return f"[{day_num}일차 | {plan.date or date_label}]\n" + "\n".join(plan.schedule)
+        schedule = _normalize_schedule(list(plan.schedule))
+        return f"[{day_num}일차 | {plan.date or date_label}]\n" + "\n".join(schedule)
     except Exception:
         return existing  # 실패 시 기존 일정 유지
 

@@ -24,6 +24,20 @@ class FamousSpotList(BaseModel):
     spots: List[FamousSpot]
 
 
+_EXCLUDE_KEYWORDS = {
+    "식당", "맛집", "횟집", "국밥", "갈비", "냉면", "치킨", "빵집",
+    "베이커리", "분식", "초밥", "짬뽕", "삼겹살", "돼지", "곱창",
+    "카페", "커피", "조개구이", "족발", "보쌈",
+    "라이브", "주점", "술집", "포차", "클럽", "나이트", "호프", "bar", "pub",
+    "의원", "병원", "외과", "내과", "치과", "한의원", "약국",
+    "부동산", "은행", "편의점", "마트", "주유소", "세탁",
+}
+
+def _is_non_tourist(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in _EXCLUDE_KEYWORDS)
+
+
 def _normalize(text: str) -> str:
     return text.replace(" ", "").lower()
 
@@ -43,8 +57,8 @@ def _to_spot_dict(title: str, address: str, category: str, location: str, **extr
     sort = "comment" if category in ("맛집", "카페") else "random"
     coord = (
         geocode(f"{location} {title}", sort)     # 1순위: "부산 깡통시장"
-        or geocode(title, sort)                  # 2순위: 장소명 단독
-        or geocode(f"{address} {title}", sort)   # 3순위: 주소 결합
+        or geocode(f"{address} {title}", sort)   # 2순위: 주소 결합
+        # 도시명 없는 단독 검색은 다른 도시 결과가 나올 수 있어 제거
     )
     return {
         "title":      title,
@@ -104,8 +118,10 @@ def Spot_Enhancer(state: TravelState) -> dict:
     except Exception:
         return {"tourist_spots": api_spots}
 
-    # 중복 제거
-    unique_spots = [s for s in llm_spots if not _is_duplicate(s.title, existing_titles)]
+    # 중복 제거 + 비관광지(식당·주점·병원 등) 제거
+    unique_spots = [s for s in llm_spots
+                    if not _is_duplicate(s.title, existing_titles)
+                    and not _is_non_tourist(s.title)]
     for s in unique_spots:
         existing_titles.append(s.title)
 
@@ -136,6 +152,6 @@ def Spot_Enhancer(state: TravelState) -> dict:
 
     valid_spots = [
         s for s in new_spots
-        if s.get("mapx") and s.get("mapy") or s.get("must_visit")
+        if s.get("mapx") and s.get("mapy")  # 좌표 있는 것만 포함 (must_visit도 동일)
     ]
     return {"tourist_spots": api_spots + valid_spots}

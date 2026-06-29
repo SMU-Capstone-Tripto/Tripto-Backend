@@ -34,6 +34,8 @@ class TravelState(InputState):
     transport_routes: Optional[List[dict]] # 출발지→목적지 교통 경로
     num_people: Optional[int]             # 여행 인원 수
     last_asked_field: Optional[str]      # 마지막으로 봇이 물어본 필드명
+    selected_acc: Optional[dict]         # Optimizer가 선택한 숙소
+    room_combination: Optional[List[dict]]  # DP로 계산한 최적 객실 조합
 
 
 

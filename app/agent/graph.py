@@ -50,7 +50,7 @@ def route_info(state: TravelState):
             return "revision_manager"
         # 최초 일정 생성 → 전체 검색 + 최적화
         print("\n[상태] 사용자 확인 완료 -> 최적화 프로세스 진행")
-        return ["travel_searcher", "tourist_searcher", "restaurant_searcher", "transport_searcher"]
+        return ["travel_searcher", "tourist_searcher", "transport_searcher"]
 
     if step == "info_gathered":
         print("\n[상태] 모든 정보 수집 완료 -> 사용자 확인 요청")
@@ -79,7 +79,7 @@ def build_graph():
     workflow.add_edge("confirmer",           END)
     workflow.add_edge("travel_searcher",     "optimizer")
     workflow.add_edge("tourist_searcher",    "spot_enhancer")
-    workflow.add_edge("spot_enhancer",       "optimizer")
+    workflow.add_edge("spot_enhancer",       "restaurant_searcher")
     workflow.add_edge("restaurant_searcher", "optimizer")
     workflow.add_edge("transport_searcher",  "optimizer")
     workflow.add_edge("optimizer",           END)

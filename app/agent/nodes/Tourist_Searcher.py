@@ -4,9 +4,26 @@ from state import TravelState
 
 _ADMIN_SUFFIX = re.compile(r'[시구군읍면동리]$')
 
+_EXCLUDE_KEYWORDS = {
+    # 식음료
+    "식당", "맛집", "카페", "커피", "조개구이", "국밥", "횟집",
+    "갈비", "냉면", "치킨", "빵집", "베이커리", "분식", "초밥",
+    "스시", "파스타", "라멘", "레스토랑", "돼지", "곱창", "족발",
+    "보쌈", "쌈밥", "찜닭", "불고기", "짬뽕", "짜장", "삼겹살",
+    # 유흥·주점
+    "라이브", "주점", "술집", "포차", "클럽", "나이트", "호프",
+    "이자카야", "bar", "pub", "막걸리",
+    # 의료·상업
+    "의원", "병원", "외과", "내과", "치과", "한의원", "약국",
+    "부동산", "은행", "편의점", "마트", "주유소", "세탁",
+}
+
 def _district_match(district: str, address: str) -> bool:
     core = _ADMIN_SUFFIX.sub('', district)
     return bool(core) and core in address
+
+def _is_non_tourist(title: str) -> bool:
+    return any(kw in title for kw in _EXCLUDE_KEYWORDS)
 
 
 def Tourist_Searcher(state: TravelState) -> dict:
@@ -41,6 +58,9 @@ def Tourist_Searcher(state: TravelState) -> dict:
         }
         for item in raw_list
     ]
+
+    # 식당·주점·병원 등 비관광지 제거
+    tourist_spots = [t for t in tourist_spots if not _is_non_tourist(t.get("title", ""))]
 
     if district:
         filtered = [t for t in tourist_spots if _district_match(district, t.get("address", ""))]
