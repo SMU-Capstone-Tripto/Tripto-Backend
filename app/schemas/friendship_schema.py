@@ -57,7 +57,7 @@ class FriendRequestResponse(BaseModel):
 
 class FriendRequestAction(BaseModel):
     friendship_id: int
-    action: str  # "accept" | "reject"
+    is_accept: bool
 
 
 class FriendListItem(BaseModel):
