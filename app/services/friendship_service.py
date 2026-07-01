@@ -92,6 +92,7 @@ async def send_friend_request(
         actor_id=current_user.user_id,
         actor_nickname=current_user.nickname,
     )
+    await db.commit()
 
     return FriendRequestResponse.from_friendship(friendship)
 
@@ -225,3 +226,4 @@ async def remove_friend(
         raise HTTPException(status_code=404, detail="친구 관계를 찾을 수 없습니다.")
 
     await db.delete(friendship)
+    await db.commit()

@@ -47,14 +47,15 @@ async def received_requests(
 
 
 # ── 친구 요청 수락/거절 ───────────────────────────────────
-@router.patch("/request/respond", response_model=FriendRequestResponse, summary="친구 요청 수락/거절")
+@router.patch("/request/respond", summary="친구 요청 수락/거절")
 async def respond_request(
     body: FriendRequestAction,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
+
     return await friendship_service.respond_to_friend_request(
-        body.friendship_id, body.action, current_user, db
+        db, body.friendship_id, body.is_accept, current_user.user_id
     )
 
 
