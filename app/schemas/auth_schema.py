@@ -115,3 +115,6 @@ class PasswordResetRequest(BaseModel):
     email: EmailStr = Field(..., description="계정 이메일 주소")
     verification_code: str = Field(..., description="6자리 인증 코드")
     new_password: str = Field(..., min_length=8, description="변경할 비밀번호 (영문 대소문자 + 특수문자 혼합 8자 이상)")
+
+class WithdrawRequest(BaseModel):
+    verification_code: str

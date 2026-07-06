@@ -25,6 +25,7 @@ from app.schemas.auth_schema import (
     UserResponse,
     UserUpdateRequest,
     PasswordChangeRequest,
+    WithdrawRequest,
 )
 from app.services.auth_service import (
     register_user, 
@@ -32,7 +33,8 @@ from app.services.auth_service import (
     kakao_login, 
     google_login, 
     change_user_password, 
-    reset_user_password
+    reset_user_password,
+    withdraw_user
 )
 from app.services.email_service import (
     generate_verification_code,
@@ -206,3 +208,18 @@ async def reset_password(
 ):
     await reset_user_password(db, redis_client, body)
     return {"message": "비밀번호가 성공적으로 초기화되었습니다. 새 비밀번호로 로그인해 주세요."}
+
+# 회원 탈퇴 
+@router.delete("/me", summary="회원 탈퇴")
+async def withdraw(
+    body: WithdrawRequest, # 클라이언트가 입력한 인증 코드
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+    redis: aioredis.Redis = Depends(get_redis) # Redis 주입 추가
+):
+    return await withdraw_user(
+        db=db, 
+        redis=redis,
+        current_user=current_user,
+        verification_code=body.verification_code
+    )
