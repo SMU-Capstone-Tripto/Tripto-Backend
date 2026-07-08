@@ -9,7 +9,9 @@ class ChatRoom(Base, TimestampMixin):
     room_name = Column(String(100), nullable=True)  # 그룹채팅 시 방 이름
     owner_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
     member_ids = Column(JSON, default=[], nullable=False)
-    # 관계: 채팅방은 여러 멤버를 가질 수 있고, 여러 메시지를 가질 수 있음
+    
+    owner_rel = relationship("User", back_populates="owned_chat_rooms")
+
     members = relationship("ChatRoomMember", back_populates="room", cascade="all, delete-orphan")
     messages = relationship("ChatMessage", back_populates="room", cascade="all, delete-orphan")
 
@@ -22,7 +24,7 @@ class ChatRoomMember(Base):
 
     room = relationship("ChatRoom", back_populates="members")
     user = relationship("User")
-    last_read_message_id = Column(Integer, ForeignKey("chat_messages.message_id"), nullable=True)
+    last_read_message_id = Column(Integer, ForeignKey("chat_messages.message_id", ondelete="SET NULL"), nullable=True)
 
 class ChatMessage(Base, TimestampMixin):
     __tablename__ = "chat_messages"
