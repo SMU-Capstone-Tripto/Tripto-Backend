@@ -6,7 +6,9 @@ WORKDIR /app
 
 # 3. requirements.txt 먼저 복사하고 설치
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY app/agent/requirements.txt ./agent_requirements.txt
+RUN pip install --no-cache-dir -r agent_requirements.txt && \
+    pip install --no-cache-dir -r requirements.txt
 
 # 4. 전체 코드 복사
 COPY . .

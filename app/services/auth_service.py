@@ -283,3 +283,27 @@ async def reset_user_password(db: AsyncSession, redis_client, data: PasswordRese
     
     # db.add(user) # SQLAlchemy 버전에 따라 생략 가능
     await db.flush() # 영속성 컨텍스트 반영
+
+async def withdraw_user(
+    db: AsyncSession, 
+    redis: aioredis.Redis, 
+    current_user: User, 
+    verification_code: str
+):
+    is_valid = await verify_email_code(redis, current_user.email, verification_code)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="이메일 인증 코드가 올바르지 않거나 만료되었습니다."
+        )
+
+    result = await db.execute(select(User).where(User.user_id == current_user.user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="이미 탈퇴했거나 존재하지 않는 유저입니다.")
+
+    await db.delete(user)
+    await db.commit()
+
+    return {"message": "정상적으로 탈퇴 처리되었습니다."}

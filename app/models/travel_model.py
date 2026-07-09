@@ -16,7 +16,7 @@ class Travel(Base, TimestampMixin):
     end_date = Column(Date, nullable=False, comment="여행 종료일")
     share_token = Column(String(36), unique=True, nullable=True, index=True, comment="공개 공유 토큰 (UUID)")
 
-    owner = relationship("User", foreign_keys=[owner_id])
+    owner = relationship("User", foreign_keys=[owner_id], back_populates="travels")
     schedules = relationship(
         "Schedule",
         back_populates="travel",

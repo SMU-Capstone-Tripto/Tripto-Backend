@@ -59,9 +59,22 @@ class User(Base):
         "Friendship",
         foreign_keys="Friendship.requester_id",
         back_populates="requester",
+        cascade="all, delete-orphan"
     )
     received_friend_requests = relationship(
         "Friendship",
         foreign_keys="Friendship.addressee_id",
         back_populates="addressee",
+        cascade="all, delete-orphan"
+    )
+    travels = relationship(
+        "Travel", 
+        back_populates="owner", 
+        cascade="all, delete-orphan"
+        
+    )
+    owned_chat_rooms = relationship(
+        "ChatRoom",
+        back_populates="owner_rel",
+        cascade="all, delete-orphan"
     )
