@@ -1016,19 +1016,35 @@ def Optimizer(state: TravelState) -> dict:
         acc_titles = [a.get("title", "") for a in accommodations]
         itinerary = _fix_accommodation_name(itinerary, selected_acc.get("title", ""), acc_titles)
 
+    estimated_cost = {
+        "transportation": transport_cost_total,
+        "accommodation":  accommodation_cost_total,
+        "meals":          meals_cost_total,
+        "activities":     activities_cost_total,
+        "total":          total_calculated,
+        "budget":         budget,
+    }
+
+    history = list(state.get("itinerary_history") or [])
+    new_snap = {
+        "version":        len(history) + 1,
+        "plan_title":     plan.title,
+        "itinerary":      itinerary,
+        "estimated_cost": estimated_cost,
+        "selected_acc":   selected_acc,
+        "traveldates":    traveldates,
+        "city":           city,
+        "created_at":     datetime.now().isoformat(),
+    }
+    itinerary_history = ([new_snap] + history)[:3]
+
     return {
-        "current_step": "optimized",
-        "plan_title": plan.title,
-        "itinerary": itinerary,
+        "current_step":     "optimized",
+        "plan_title":       plan.title,
+        "itinerary":        itinerary,
+        "itinerary_history": itinerary_history,
         "itinerary_feedback": None,
-        "selected_acc":      selected_acc,
-        "room_combination":  room_combination if not is_day_trip else [],
-        "estimated_cost": {
-            "transportation": transport_cost_total,
-            "accommodation":  accommodation_cost_total,
-            "meals":          meals_cost_total,
-            "activities":     activities_cost_total,
-            "total":          total_calculated,
-            "budget":         budget,
-        },
+        "selected_acc":     selected_acc,
+        "room_combination": room_combination if not is_day_trip else [],
+        "estimated_cost":   estimated_cost,
     }
