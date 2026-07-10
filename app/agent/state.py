@@ -22,7 +22,8 @@ class TravelState(InputState):
 
     plan_title: Optional[str]               # Optimizer가 생성한 여행 제목
     itinerary: List[str]                    # 확정된 일정 리스트 (일자별)
-    
+    itinerary_history: Optional[List[dict]] # 최근 3개 버전 스냅샷 (투표용)
+
     itinerary_feedback: Optional[str]       # "1일차 카페 삭제, 2일차 저녁 식당 변경" 등 세부 요구사항
 
     estimated_cost: Optional[dict]          # 예상 경비 breakdown

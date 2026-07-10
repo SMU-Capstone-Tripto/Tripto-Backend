@@ -299,9 +299,23 @@ def Revision_Manager(state: TravelState) -> dict:
     else:
         done_msg = "일정을 수정했어요. 오른쪽에서 확인해 보세요!"
 
+    history = list(state.get("itinerary_history") or [])
+    new_snap = {
+        "version":        len(history) + 1,
+        "plan_title":     state.get("plan_title", ""),
+        "itinerary":      new_itinerary,
+        "estimated_cost": state.get("estimated_cost"),
+        "selected_acc":   state.get("selected_acc"),
+        "traveldates":    state.get("traveldates", ""),
+        "city":           state.get("city", ""),
+        "created_at":     datetime.now().isoformat(),
+    }
+    itinerary_history = ([new_snap] + history)[:3]
+
     return {
-        "current_step": "optimized",
-        "itinerary": new_itinerary,
+        "current_step":      "optimized",
+        "itinerary":         new_itinerary,
+        "itinerary_history": itinerary_history,
         "itinerary_feedback": None,
-        "messages": [AIMessage(content=done_msg)],
+        "messages":          [AIMessage(content=done_msg)],
     }

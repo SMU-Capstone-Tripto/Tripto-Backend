@@ -1,0 +1,174 @@
+from typing import List
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_async_db
+from app.core.dependencies import get_current_user
+from app.models.user_model import User
+from app.schemas.vote_schema import (
+    FinalizeResponse,
+    SnapshotOut,
+    VoteCastRequest,
+    VoteCreateRequest,
+    VoteResultItem,
+    VoteSessionResponse,
+)
+from app.services import vote_service
+
+router = APIRouter(prefix="/vote", tags=["투표"])
+
+
+@router.post("/create", response_model=VoteSessionResponse, summary="투표 세션 생성")
+async def create_vote(
+    body: VoteCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    현재 세션의 최근 itinerary 스냅샷으로 투표를 시작합니다.
+
+    - **solo**: room_id 불필요. 본인이 선택하면 즉시 확정.
+    - **group**: room_id 필수. 채팅방 멤버 전원에게 알림 발송.
+
+    투표할 스냅샷이 없으면 먼저 AI와 대화해 일정을 생성하세요.
+    """
+    from app.services.agent_service import get_session
+
+    session_data = get_session(current_user.user_id)
+    snapshot_ids: List[int] = session_data.get("snapshot_ids", [])
+
+    if not snapshot_ids:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="투표할 일정 버전이 없습니다. AI와 대화해 일정을 먼저 생성하세요.")
+
+    vote_session = await vote_service.create_vote_session(
+        db=db,
+        creator_id=current_user.user_id,
+        creator_nickname=current_user.nickname,
+        vote_type=body.vote_type,
+        snapshot_ids=snapshot_ids,
+        room_id=body.room_id,
+    )
+
+    return await _build_response(db, vote_session, current_user.user_id)
+
+
+# ── 정적 경로를 동적 경로보다 먼저 등록 (Fix 1) ──────────────────────────
+@router.get("/active", response_model=List[VoteSessionResponse], summary="참여 대기 중인 투표 목록")
+async def list_active_votes(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """내가 만들었거나 내가 속한 채팅방의 활성 투표 목록을 반환합니다."""
+    sessions = await vote_service.get_active_votes(db, current_user.user_id)
+    return [await _build_response(db, s, current_user.user_id) for s in sessions]
+
+
+@router.get("/{vote_id}", response_model=VoteSessionResponse, summary="투표 현황 조회")
+async def get_vote(
+    vote_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """투표 현황(각 버전 득표수, 내 투표 여부, 만료 시간)을 조회합니다."""
+    vote_session = await vote_service.get_vote_session(db, vote_id)
+    return await _build_response(db, vote_session, current_user.user_id)
+
+
+@router.post("/{vote_id}/cast", summary="투표 참여")
+async def cast_vote(
+    vote_id: int,
+    body: VoteCastRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    선택한 일정 버전에 투표합니다. 1인 1표만 허용됩니다.
+
+    - **solo**: 투표 즉시 해당 버전으로 확정됩니다.
+    - **group**: 전원 투표 완료 시 자동 확정됩니다.
+    """
+    await vote_service.cast_vote(
+        db=db,
+        vote_id=vote_id,
+        voter_id=current_user.user_id,
+        snapshot_id=body.snapshot_id,
+    )
+    return {"message": "투표가 완료되었습니다."}
+
+
+@router.post("/{vote_id}/finalize", response_model=FinalizeResponse, summary="투표 강제 확정 및 여행 등록")
+async def finalize_vote(
+    vote_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    투표를 마감하고 최다 득표 일정을 최종 여행으로 등록합니다.
+    투표 생성자만 호출할 수 있습니다.
+    전원 투표 완료로 자동 확정된 경우에도 이 API로 Travel을 생성하세요.
+    """
+    travel = await vote_service.finalize_vote(
+        db=db,
+        vote_id=vote_id,
+        current_user_id=current_user.user_id,
+    )
+    return FinalizeResponse(
+        travel_id=travel.travel_id,
+        message="일정이 최종 확정되었습니다. 여행 탭에서 확인하세요!",
+    )
+
+
+# ── 헬퍼 ──────────────────────────────────────────────────────────────────
+
+async def _build_response(db: AsyncSession, vote_session, user_id: int) -> VoteSessionResponse:
+    """VoteSession ORM → VoteSessionResponse 변환"""
+    from sqlalchemy import select
+    from app.models.itinerary_vote_model import ItinerarySnapshot
+
+    snapshots = await vote_service.get_snapshots_by_ids(db, vote_session.snapshot_ids)
+    snap_map = {s.snapshot_id: s for s in snapshots}
+
+    # 득표 집계
+    counts: dict[int, int] = {sid: 0 for sid in vote_session.snapshot_ids}
+    my_vote: int | None = None
+    for record in vote_session.records:
+        counts[record.snapshot_id] = counts.get(record.snapshot_id, 0) + 1
+        if record.voter_id == user_id:
+            my_vote = record.snapshot_id
+
+    results = [
+        VoteResultItem(
+            snapshot_id=sid,
+            plan_title=snap_map[sid].plan_title if sid in snap_map else None,
+            vote_count=counts.get(sid, 0),
+        )
+        for sid in vote_session.snapshot_ids
+    ]
+
+    snapshots_out = [
+        SnapshotOut(
+            snapshot_id=s.snapshot_id,
+            version_num=s.version_num,
+            plan_title=s.plan_title,
+            itinerary=s.itinerary,
+            estimated_cost=s.estimated_cost,
+            city=s.city,
+            traveldates=s.traveldates,
+            created_at=s.created_at,
+        )
+        for s in sorted(snapshots, key=lambda x: x.version_num, reverse=True)
+    ]
+
+    return VoteSessionResponse(
+        vote_id=vote_session.vote_id,
+        vote_type=vote_session.vote_type.value,
+        status=vote_session.status.value,
+        snapshots=snapshots_out,
+        results=results,
+        my_vote=my_vote,
+        winner_snapshot_id=vote_session.winner_snapshot_id,
+        expires_at=vote_session.expires_at,
+        created_at=vote_session.created_at,
+    )

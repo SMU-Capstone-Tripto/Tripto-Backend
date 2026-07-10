@@ -6,6 +6,7 @@ from app.models.schedule_model import Schedule, ScheduleCategoryEnum
 from app.models.memo_model import Memo
 from app.models.chat_model import ChatRoom, ChatRoomMember, ChatMessage
 from app.models.notification_model import Notification, NotificationType
+from app.models.itinerary_vote_model import ItinerarySnapshot, VoteSession, VoteRecord, VoteType, VoteStatus
 
 __all__ = [
     "Base", "TimestampMixin",
@@ -16,4 +17,5 @@ __all__ = [
     "Memo",
     "ChatRoom", "ChatRoomMember", "ChatMessage",
     "Notification", "NotificationType",
+    "ItinerarySnapshot", "VoteSession", "VoteRecord", "VoteType", "VoteStatus",
 ]
