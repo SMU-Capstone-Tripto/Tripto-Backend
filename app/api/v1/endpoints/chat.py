@@ -6,8 +6,9 @@ import aiofiles
 from fastapi import APIRouter, Depends, File, Query, UploadFile, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import get_async_db
+from app.core.database import get_async_db, AsyncSessionLocal
 from app.core.dependencies import get_current_user
+
 from app.models.user_model import User
 from app.models.chat_model import ChatMessage, ChatRoom
 from app.schemas.chat_schema import ChatRoomCreate, ChatRoomResponse, ChatRoomInvite, ChatMessageResponse
@@ -109,53 +110,62 @@ async def send_image(
     return {"message": "사진이 전송되었습니다.", "url": file_url}
 
 @router.websocket("/ws/{room_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = Query(...), db: AsyncSession = Depends(get_async_db)):
-    # 해당 유저가 이 방의 멤버인지 조회
-    result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
-    room = result.scalar_one_or_none()
-    
-    if not room or user_id not in room.member_ids:
-        await websocket.close(code=1003)
-        return
+async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = Query(...)):
+    # 초기 입장 시 단발성 세션 오픈 
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
+        room = result.scalar_one_or_none()
+        
+        if not room or user_id not in room.member_ids:
+            await websocket.close(code=1003)
+            return
         
     await chat_service.manager.connect(room_id, websocket)
+
     try:
         while True:
+            # 3. 클라이언트로부터 메시지 대기 (루프의 대기 지점)
             data = await websocket.receive_text()
             
             try:
                 payload = json.loads(data)
                 action = payload.get("action")
 
-                # 새로운 메시지를 전송한 경우 
-                if action == "send_message":
-                    content = payload.get("content")
-                    # DB에 메시지 저장
-                    new_msg = await chat_service.save_message(db, room_id, user_id, content)
-                    # 보낸 사람은 자동으로 읽음 처리
-                    await chat_service.update_last_read(db, room_id, user_id, new_msg.message_id)
-                    await chat_service.manager.broadcast(room_id, json.dumps({
-                        "type": "new_message",
-                        "message_id": new_msg.message_id,
-                        "sender_id": user_id,
-                        "content": content
-                    }))
-                
-                # 메시지를 새로 읽은 경우 
-                elif action == "read_message":
-                    message_id = payload.get("message_id")
+                # 4. 💡 핵심: 메시지가 들어올 때마다 새로운 독립 세션을 열고 작업이 끝나면 닫습니다.
+                async with AsyncSessionLocal() as db:
                     
-                    # DB 업데이트
-                    updated = await chat_service.update_last_read(db, room_id, user_id, message_id)
-                    if updated:
+                    if action == "send_message":
+                        content = payload.get("content")
+                        
+                        # DB에 메시지 저장 (새 세션 사용)
+                        new_msg = await chat_service.save_message(db, room_id, user_id, content)
+                        # 보낸 사람은 자동으로 읽음 처리
+                        await chat_service.update_last_read(db, room_id, user_id, new_msg.message_id)
+                        
+                        # 브로드캐스팅
                         await chat_service.manager.broadcast(room_id, json.dumps({
-                            "type": "read_update",
-                            "user_id": user_id,
-                            "last_read_message_id": message_id
+                            "type": "new_message",
+                            "message_id": new_msg.message_id,
+                            "sender_id": user_id,
+                            "content": content
                         }))
+                    
+                    elif action == "read_message":
+                        message_id = payload.get("message_id")
+                        
+                        # DB 업데이트 (새 세션 사용)
+                        updated = await chat_service.update_last_read(db, room_id, user_id, message_id)
+                        if updated:
+                            await chat_service.manager.broadcast(room_id, json.dumps({
+                                "type": "read_update",
+                                "user_id": user_id,
+                                "last_read_message_id": message_id
+                            }))
 
             except json.JSONDecodeError:
                 print("잘못된 JSON 형식의 데이터가 수신됨")
+            except Exception as e:
+                print(f"웹소켓 메시지 처리 중 에러 발생: {e}")
 
     except WebSocketDisconnect:
         chat_service.manager.disconnect(room_id, websocket)
