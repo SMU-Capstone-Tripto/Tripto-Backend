@@ -124,6 +124,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = 
 
     # 초기 읽음 상태 동기화 
     try:
+        await asyncio.sleep(0.5)
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id)
