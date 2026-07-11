@@ -60,21 +60,27 @@ async def get_messages(room_id: int, db: AsyncSession = Depends(get_async_db)):
     )
     messages = msg_result.scalars().all()
 
-    # 최종 읽음 위치 조회
+    # 읽음 위치 + 조인으로 닉네임까지 조회
     member_result = await db.execute(
-        select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id)
+        select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id, User.nickname)
+        .join(User, ChatRoomMember.user_id == User.user_id)
         .where(ChatRoomMember.room_id == room_id)
     )
     
-    # 딕셔너리로 가공 (유저ID: 마지막읽은메시지ID)
     read_statuses = {}
+    user_names = {} 
+
     for row in member_result.all():
+        # 읽음 상태 맵핑
         if row.last_read_message_id is not None:
             read_statuses[str(row.user_id)] = row.last_read_message_id
+        
+        user_names[str(row.user_id)] = row.nickname
 
     return {
         "messages": messages,
-        "read_statuses": read_statuses
+        "read_statuses": read_statuses,
+        "user_names": user_names  # 💡 프론트엔드 요청 사항 반영 완료
     }
 
 # 채팅방 나가기 API
@@ -128,7 +134,9 @@ async def send_image(
 
 @router.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = Query(...)):
-    # 초기 입장 시 단발성 세션 오픈 
+
+    my_nickname = "알 수 없음" 
+    
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
         room = result.scalar_one_or_none()
@@ -136,41 +144,42 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = 
         if not room or user_id not in room.member_ids:
             await websocket.close(code=1003)
             return
+            
+        # 자신의 닉네임을 DB에서 한 번만 조회해 둠
+        user_result = await db.execute(select(User.nickname).where(User.user_id == user_id))
+        db_nickname = user_result.scalar_one_or_none()
+        if db_nickname:
+            my_nickname = db_nickname
         
     await chat_service.manager.connect(room_id, websocket)
 
     try:
         while True:
-            # 메시지 대기
             data = await websocket.receive_text()
             
             try:
                 payload = json.loads(data)
                 action = payload.get("action")
 
-                # 메시지가 들어올 때마다 새로운 세션을 열고 닫기 
                 async with AsyncSessionLocal() as db:
-                    
                     if action == "send_message":
                         content = payload.get("content")
                         
-                        # DB에 메시지 저장 (새 세션 사용)
+                        # DB에 메시지 저장 
                         new_msg = await chat_service.save_message(db, room_id, user_id, content)
-                        # 보낸 사람은 자동으로 읽음 처리
                         await chat_service.update_last_read(db, room_id, user_id, new_msg.message_id)
                         
-                        # 브로드캐스팅
                         await chat_service.manager.broadcast(room_id, json.dumps({
                             "type": "new_message",
                             "message_id": new_msg.message_id,
                             "sender_id": user_id,
+                            "sender_nickname": my_nickname, 
                             "content": content
                         }))
                     
                     elif action == "read_message":
                         message_id = payload.get("message_id")
                         
-                        # DB 업데이트 (새 세션 사용)
                         updated = await chat_service.update_last_read(db, room_id, user_id, message_id)
                         if updated:
                             await chat_service.manager.broadcast(room_id, json.dumps({
