@@ -55,10 +55,27 @@ async def invite_to_room(
 @router.get("/{room_id}/messages", summary="메시지 조회")
 async def get_messages(room_id: int, db: AsyncSession = Depends(get_async_db)):
     # DB에서 해당 방의 대화 기록 조회
-    result = await db.execute(
+    msg_result = await db.execute(
         select(ChatMessage).where(ChatMessage.room_id == room_id).order_by(ChatMessage.created_at.asc())
     )
-    return result.scalars().all()
+    messages = msg_result.scalars().all()
+
+    # 최종 읽음 위치 조회
+    member_result = await db.execute(
+        select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id)
+        .where(ChatRoomMember.room_id == room_id)
+    )
+    
+    # 딕셔너리로 가공 (유저ID: 마지막읽은메시지ID)
+    read_statuses = {}
+    for row in member_result.all():
+        if row.last_read_message_id is not None:
+            read_statuses[str(row.user_id)] = row.last_read_message_id
+
+    return {
+        "messages": messages,
+        "read_statuses": read_statuses
+    }
 
 # 채팅방 나가기 API
 @router.delete("/{room_id}/leave", summary="채팅방 나가기")
@@ -121,27 +138,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = 
             return
         
     await chat_service.manager.connect(room_id, websocket)
-
-    # 초기 읽음 상태 동기화 
-    try:
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id)
-                .where(ChatRoomMember.room_id == room_id)
-                .where(ChatRoomMember.last_read_message_id.isnot(None)) # 읽은 기록이 있는 멤버만
-            )
-            read_statuses = result.all()
-
-            for member_id, last_read_id in read_statuses:
-                sync_data = {
-                    "type": "read_update",
-                    "user_id": member_id,
-                    "last_read_message_id": last_read_id
-                }
-                # 브로드캐스트X 방금 접속한 클라이언트에게 단발성으로 전송
-                await websocket.send_text(json.dumps(sync_data))
-    except Exception as e:
-        print(f"읽음 상태 동기화 에러: {e}")
 
     try:
         while True:
