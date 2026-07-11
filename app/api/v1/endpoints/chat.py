@@ -10,8 +10,8 @@ from app.core.database import get_async_db, AsyncSessionLocal
 from app.core.dependencies import get_current_user
 
 from app.models.user_model import User
-from app.models.chat_model import ChatMessage, ChatRoom
-from app.schemas.chat_schema import ChatRoomCreate, ChatRoomResponse, ChatRoomInvite, ChatMessageResponse
+from app.models.chat_model import ChatMessage, ChatRoom, ChatRoomMember
+from app.schemas.chat_schema import ChatRoomCreate, ChatRoomResponse, ChatRoomInvite
 from app.services import chat_service
 
 router = APIRouter(prefix="/chat", tags=["채팅"])
@@ -122,16 +122,37 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = 
         
     await chat_service.manager.connect(room_id, websocket)
 
+    # 초기 읽음 상태 동기화 
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id)
+                .where(ChatRoomMember.room_id == room_id)
+                .where(ChatRoomMember.last_read_message_id.isnot(None)) # 읽은 기록이 있는 멤버만
+            )
+            read_statuses = result.all()
+
+            for member_id, last_read_id in read_statuses:
+                sync_data = {
+                    "type": "read_update",
+                    "user_id": member_id,
+                    "last_read_message_id": last_read_id
+                }
+                # 브로드캐스트X 방금 접속한 클라이언트에게 단발성으로 전송
+                await websocket.send_text(json.dumps(sync_data))
+    except Exception as e:
+        print(f"읽음 상태 동기화 에러: {e}")
+
     try:
         while True:
-            # 3. 클라이언트로부터 메시지 대기 (루프의 대기 지점)
+            # 메시지 대기
             data = await websocket.receive_text()
             
             try:
                 payload = json.loads(data)
                 action = payload.get("action")
 
-                # 4. 💡 핵심: 메시지가 들어올 때마다 새로운 독립 세션을 열고 작업이 끝나면 닫습니다.
+                # 메시지가 들어올 때마다 새로운 세션을 열고 닫기 
                 async with AsyncSessionLocal() as db:
                     
                     if action == "send_message":
