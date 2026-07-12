@@ -3,6 +3,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chat_model import ChatRoom, ChatRoomMember, ChatMessage
 from typing import Dict, List, Optional
+import json 
 
 # 채팅방 생성
 async def create_room(db: AsyncSession, owner_id: int, invited_ids: List[int], room_name: Optional[str] = None) -> int:
@@ -74,7 +75,11 @@ async def leave_room(db: AsyncSession, room_id: int, user_id: int):
         
     room.member_ids = [m for m in room.member_ids if m != user_id]
     await db.commit()
-    await manager.broadcast(room_id, f"User {user_id}님이 퇴장했습니다.")
+    await manager.broadcast(room_id, json.dumps({
+        "type": "user_left",
+        "user_id": user_id,
+        "content": f"User {user_id}님이 퇴장했습니다.",
+    }, ensure_ascii=False))
   
 # DB에 메시지 저장 
 async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: str, message_type: str = "text"):
