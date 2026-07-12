@@ -3,12 +3,12 @@ import os
 from typing import List
 import uuid
 import aiofiles
-from fastapi import APIRouter, Depends, File, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import HTTPException, APIRouter, Depends, File, Query, UploadFile, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_async_db, AsyncSessionLocal
 from app.core.dependencies import get_current_user
-
+from app.core.security import verify_access_token
 from app.models.user_model import User
 from app.models.chat_model import ChatMessage, ChatRoom, ChatRoomMember
 from app.schemas.chat_schema import ChatRoomCreate, ChatRoomResponse, ChatRoomInvite
@@ -88,10 +88,10 @@ async def get_messages(room_id: int, db: AsyncSession = Depends(get_async_db)):
 async def leave_room(
     room_id: int, 
     db: AsyncSession = Depends(get_async_db),
-    user_id: int = Query(...) 
+    current_user: User = Depends(get_current_user)
 ):
-    await chat_service.leave_room(db, room_id, user_id)
-    return {"message": f"id {user_id}: 채팅방을 나갔습니다."}
+    await chat_service.leave_room(db, room_id, current_user.user_id)
+    return {"message": f"id {current_user.user_id}: 채팅방을 나갔습니다."}
 
 # 사진 전송 API
 @router.post("/{room_id}/image", summary="사진 전송")
@@ -133,23 +133,33 @@ async def send_image(
     return {"message": "사진이 전송되었습니다.", "url": file_url}
 
 @router.websocket("/ws/{room_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int = Query(...)):
+async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Query(...)):
 
-    my_nickname = "알 수 없음" 
-    
+    # 💡 수정: 초기 입장 시 JWT 토큰 검증 및 DB 확인
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
-        room = result.scalar_one_or_none()
-        
-        if not room or user_id not in room.member_ids:
-            await websocket.close(code=1003)
+        try:
+            # 토큰 해독 및 유저 ID 추출
+            payload = verify_access_token(token)
+            user_id = int(payload.get("sub"))
+        except HTTPException:
+            await websocket.close(code=1008) # Policy Violation
+            return
+
+        # 유저 활성화 상태 및 닉네임 조회
+        result = await db.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+        if not user or not user.is_active:
+            await websocket.close(code=1008)
             return
             
-        # 자신의 닉네임을 DB에서 한 번만 조회해 둠
-        user_result = await db.execute(select(User.nickname).where(User.user_id == user_id))
-        db_nickname = user_result.scalar_one_or_none()
-        if db_nickname:
-            my_nickname = db_nickname
+        my_nickname = user.nickname
+
+        # 채팅방 멤버 권한 확인
+        result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
+        room = result.scalar_one_or_none()
+        if not room or user_id not in room.member_ids:
+            await websocket.close(code=1003) # Unsupported Data
+            return
         
     await chat_service.manager.connect(room_id, websocket)
 
