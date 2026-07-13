@@ -31,11 +31,15 @@ async def create_vote(
     - **solo**: room_id 불필요. 본인이 선택하면 즉시 확정.
     - **group**: room_id 필수. 채팅방 멤버 전원에게 알림 발송.
 
+    스냅샷은 `POST /agent/chat` 호출 시 사용한 것과 **동일한 room_id**의 대화 세션에서 가져옵니다.
+    즉 room_id가 있는 채팅방 안에서 AI와 나눈 대화의 결과로 투표를 만들려면, 이 요청의 room_id도
+    그 채팅방과 같은 값으로 보내야 합니다. solo 투표(room_id 없음)는 개인 대화 세션을 사용합니다.
+
     투표할 스냅샷이 없으면 먼저 AI와 대화해 일정을 생성하세요.
     """
     from app.services.agent_service import get_session
 
-    session_data = get_session(current_user.user_id)
+    session_data = await get_session(current_user.user_id, body.room_id)
     snapshot_ids: List[int] = session_data.get("snapshot_ids", [])
 
     if not snapshot_ids:
