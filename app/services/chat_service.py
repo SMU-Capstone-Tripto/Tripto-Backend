@@ -3,6 +3,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chat_model import ChatRoom, ChatRoomMember, ChatMessage
 from typing import Dict, List, Optional
+from app.services import agent_service
+from app.core.database import AsyncSessionLocal
 import json 
 
 # 채팅방 생성
@@ -116,6 +118,73 @@ async def update_last_read(db: AsyncSession, room_id: int, user_id: int, message
         return True
         
     return False
+
+async def generate_and_send_bot_reply(room_id: int, user_id: int, user_content: str, nickname: str):
+    BOT_USER_ID = -1 
+    bot_nickname = "Tripto" 
+    async with AsyncSessionLocal() as db:
+        stream = agent_service.chat_stream(user_id, user_content, db, nickname)
+
+        async for chunk in stream:
+            try:
+                if isinstance(chunk, str):
+                    chunk = chunk.strip()
+                    if chunk == "data: [DONE]":
+                        break    
+                    if chunk.startswith("data: "):
+                        json_str = chunk[6:] 
+                        data = json.loads(json_str)
+                    else:
+                        data = json.loads(chunk)
+                else:
+                    data = chunk
+
+                event_type = data.get("type")
+
+                if event_type == "status":
+                    await manager.broadcast(room_id, json.dumps({
+                        "type": "bot_status",
+                        "sender_id": BOT_USER_ID,
+                        "content": data.get("message")
+                    }, ensure_ascii=False))
+
+                elif event_type == "result":
+                    final_content = data.get("content")
+                    step = data.get("step")
+
+                    if not final_content and step == "optimized":
+                        plan_title = data.get("plan_title", "여행 계획")
+                        final_content = f"🎉 '{plan_title}' 일정이 완성되었습니다! 투표를 통해 일정을 확정해 보세요."
+
+                    new_bot_msg = await save_message(db, room_id, BOT_USER_ID, final_content)
+
+                    broadcast_data = {
+                        "type": "new_message",
+                        "message_id": new_bot_msg.message_id,
+                        "sender_id": BOT_USER_ID,
+                        "sender_nickname": bot_nickname,
+                        "content": final_content,
+                        "step": step,
+                        "snapshot_id": data.get("snapshot_id")
+                    }
+                    
+                    # 최적화 완료 시 관련 UI 데이터 추가 탑재
+                    if step == "optimized":
+                        broadcast_data["plan_title"] = data.get("plan_title")
+                        broadcast_data["itinerary"] = data.get("itinerary")
+                        broadcast_data["estimated_cost"] = data.get("estimated_cost")
+                        broadcast_data["selected_acc"] = data.get("selected_acc")
+
+                    await manager.broadcast(room_id, json.dumps(broadcast_data, ensure_ascii=False))
+                    
+                elif event_type == "error":
+                    await manager.broadcast(room_id, json.dumps({
+                        "type": "bot_error",
+                        "content": "앗, 에이전트 처리 중 문제가 발생했어요. 다시 시도해 주세요!"
+                    }, ensure_ascii=False))
+
+            except Exception as e:
+                print(f"챗봇 스트림 처리 중 에러: {e}")
 
 class ConnectionManager:
     def __init__(self):
