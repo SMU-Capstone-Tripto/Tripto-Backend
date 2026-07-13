@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from typing import List
@@ -18,6 +19,7 @@ router = APIRouter(prefix="/chat", tags=["채팅"])
 
 UPLOAD_DIR = "static/uploads/chat"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+active_bot_tasks = set() 
 
 # 채팅방 생성 API
 @router.post("/rooms", response_model=ChatRoomResponse, summary="채팅방 생성")
@@ -135,7 +137,6 @@ async def send_image(
 @router.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Query(...)):
 
-    # 💡 수정: 초기 입장 시 JWT 토큰 검증 및 DB 확인
     async with AsyncSessionLocal() as db:
         try:
             # 토큰 해독 및 유저 ID 추출
@@ -173,7 +174,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Qu
 
                 async with AsyncSessionLocal() as db:
                     if action == "send_message":
+                        
                         content = payload.get("content")
+                        BOT_USER_ID = -1
                         
                         # DB에 메시지 저장 
                         new_msg = await chat_service.save_message(db, room_id, user_id, content)
@@ -186,6 +189,18 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Qu
                             "sender_nickname": my_nickname, 
                             "content": content
                         }))
+                        if BOT_USER_ID in room.member_ids and user_id != BOT_USER_ID:
+                            is_group_chat = len(room.member_ids) > 2
+
+                            if (is_group_chat and "@챗봇" in content) or not is_group_chat:
+                                
+                                clean_content = content.replace("@트립토", "").strip() if is_group_chat else content
+                                
+                                task = asyncio.create_task(
+                                    chat_service.generate_and_send_bot_reply(room_id, user_id, clean_content, my_nickname)
+                                )
+                                active_bot_tasks.add(task)
+                                task.add_done_callback(active_bot_tasks.discard)
                     
                     elif action == "read_message":
                         message_id = payload.get("message_id")
