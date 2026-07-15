@@ -191,10 +191,13 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Qu
                         }))
                         if BOT_USER_ID in room.member_ids and user_id != BOT_USER_ID:
                             is_group_chat = len(room.member_ids) > 2
+                            bot_triggered = ("@트립토" in content) or ("@Tripto" in content)
 
-                            if (is_group_chat and "@챗봇" in content) or not is_group_chat:
+                            if (is_group_chat and bot_triggered) or not is_group_chat:
                                 
-                                clean_content = content.replace("@트립토", "").strip() if is_group_chat else content
+                                clean_content = content
+                                if is_group_chat:
+                                    clean_content = clean_content.replace("@트립토", "").replace("@Tripto", "").strip() 
                                 
                                 task = asyncio.create_task(
                                     chat_service.generate_and_send_bot_reply(room_id, user_id, clean_content, my_nickname)
