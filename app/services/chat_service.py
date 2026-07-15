@@ -9,7 +9,9 @@ import json
 
 # 채팅방 생성
 async def create_room(db: AsyncSession, owner_id: int, invited_ids: List[int], room_name: Optional[str] = None) -> int:
-    all_member_ids = list(set(invited_ids + [owner_id]))
+    BOT_USER_ID=-1
+
+    all_member_ids = list(set(invited_ids + [owner_id, BOT_USER_ID]))
     new_room = ChatRoom(owner_id=owner_id, room_name=room_name, member_ids=all_member_ids)
     db.add(new_room)
     await db.flush()
