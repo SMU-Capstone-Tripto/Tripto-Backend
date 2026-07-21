@@ -26,3 +26,6 @@ class ChatRoomResponse(BaseModel):
 
 class ChatRoomInvite(BaseModel):
     invited_user_ids: List[int] = Field(..., description="초대할 사용자 ID")
+
+class ChatImageMessageCreate(BaseModel):
+    image_url: str = Field(..., description="S3에 업로드 완료된 이미지의 URL")

@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # Email verification code TTL (seconds)
     EMAIL_CODE_TTL: int = 300  # 5 minutes
 
+    # AWS S3
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = ""
+    AWS_S3_BUCKET: str = ""
+    AWS_S3_PRESIGNED_URL_EXPIRE_SECONDS: int = 300  # 5 minutes
 
     class Config:
         env_file = ".env"
