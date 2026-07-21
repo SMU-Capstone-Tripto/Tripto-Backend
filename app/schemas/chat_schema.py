@@ -21,6 +21,7 @@ class ChatRoomResponse(BaseModel):
     owner_id: int  
     member_ids: List[int] = []  
     created_at: Optional[datetime] = None
+    has_new_message: bool = False
 
     model_config = {"from_attributes": True}
 

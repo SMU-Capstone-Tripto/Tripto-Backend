@@ -1,5 +1,5 @@
 from fastapi import HTTPException, WebSocket
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chat_model import ChatRoom, ChatRoomMember, ChatMessage
 from typing import Dict, List, Optional
@@ -93,15 +93,46 @@ async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: 
     await db.refresh(new_message)
     return new_message
 
-# 사용자가 속한 채팅방 목록 조회
-async def get_user_rooms(db: AsyncSession, user_id: int) -> List[ChatRoom]:
-    result = await db.execute(
-        select(ChatRoom)
-        .join(ChatRoomMember, ChatRoom.room_id == ChatRoomMember.room_id)
-        .where(ChatRoomMember.user_id == user_id)
-        .order_by(ChatRoom.created_at.desc()) 
+# 사용자가 속한 채팅방 목록, 새로운 메시지 여부 조회
+async def get_user_rooms(db: AsyncSession, user_id: int):
+    subq = (
+        select(
+            ChatMessage.room_id,
+            func.max(ChatMessage.created_at).label("latest_message_at"),
+            func.max(ChatMessage.message_id).label("latest_message_id")
+        )
+        .group_by(ChatMessage.room_id)
+        .subquery()
     )
-    return result.scalars().all()
+    stmt = (
+        select(ChatRoom, ChatRoomMember.last_read_message_id)
+        .join(ChatRoomMember, ChatRoom.room_id == ChatRoomMember.room_id)
+        .outerjoin(subq, ChatRoom.room_id == subq.c.room_id)
+        .where(ChatRoomMember.user_id == user_id)
+        .order_by(func.coalesce(subq.c.latest_message_at, ChatRoom.created_at).desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all() 
+
+    room_list_with_status = []
+    
+    for room, last_read_id in rows:
+        latest_msg_result = await db.execute(
+            select(func.max(ChatMessage.message_id))
+            .where(ChatMessage.room_id == room.room_id)
+        )
+        latest_message_id = latest_msg_result.scalar() or 0
+        has_new_message = latest_message_id > (last_read_id or 0)
+        
+        room_list_with_status.append({
+            "room_id": room.room_id,
+            "room_name": room.room_name,
+            "owner_id": room.owner_id,
+            "member_ids": room.member_ids,
+            "created_at": room.created_at,
+            "has_new_message": has_new_message, 
+        })
+    return room_list_with_status
 
 #사용자가 어디까지 읽었는지 DB에 업데이트
 async def update_last_read(db: AsyncSession, room_id: int, user_id: int, message_id: int) -> bool:
