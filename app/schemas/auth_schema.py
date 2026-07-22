@@ -11,6 +11,7 @@ class RegisterRequest(BaseModel):
     nickname: str
     tags: List[str] = []
     verification_code: str  # 이메일 인증 코드
+    profile_image: Optional[str] = Field(None, description="프로필 사진 파일")
 
     @field_validator("password")
     @classmethod
@@ -84,6 +85,7 @@ class UserResponse(BaseModel):
     social_id: Optional[str] = None  
     is_active: bool
     is_email_verified: bool
+    profile_image: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -91,6 +93,7 @@ class UserResponse(BaseModel):
 class UserUpdateRequest(BaseModel):
     nickname: Optional[str] = None
     tags: Optional[List[str]] = None
+    profile_image: Optional[str] = Field(None, description="프로필 사진 파일")
 
 # 비밀번호 변경(로그인 환경에서) 
 class PasswordChangeRequest(BaseModel):

@@ -43,6 +43,7 @@ async def register_user(
         nickname=data.nickname,
         hashed_password=hash_password(data.password),
         tags=data.tags,
+        profile_image=data.profile_image,
         auth_provider=AuthProvider.LOCAL,
         is_email_verified=True,
         is_active=True,
