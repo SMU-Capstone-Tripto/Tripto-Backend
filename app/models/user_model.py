@@ -11,7 +11,6 @@ import json
 
 
 class JSONList(TypeDecorator):
-    """PostgreSQL에서는 ARRAY, SQLite(테스트)에서는 JSON 문자열로 저장"""
     impl = TEXT
     cache_ok = True
 
@@ -52,7 +51,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     status_message = Column(String(100), nullable=True)
-    profile_image_url = Column(String(512), nullable=True)
+    profile_image = Column(String(512), nullable=True)
     avatar_color = Column(String(7), nullable=True)
     # 관계
     sent_friend_requests = relationship(

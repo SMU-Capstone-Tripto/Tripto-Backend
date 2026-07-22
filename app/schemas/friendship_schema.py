@@ -10,7 +10,7 @@ class FriendSearchResponse(BaseModel):
     nickname: str
     tags: List[str]
     status_message: Optional[str] = None
-    profile_image_url: Optional[str] = None
+    profile_image: Optional[str] = None
     avatar_color: Optional[str] = None
 
     model_config = {"from_attributes": True}
@@ -23,7 +23,7 @@ class FriendSearchResponse(BaseModel):
             nickname=user.nickname,
             tags=user.tags,
             status_message=user.status_message,
-            profile_image_url=user.profile_image_url,
+            profile_image=user.profile_image,
             avatar_color=user.avatar_color,
         )
 
