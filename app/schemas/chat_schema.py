@@ -6,11 +6,16 @@ class ChatRoomCreate(BaseModel):
     room_name: Optional[str] = Field(None, max_length=100)
     invited_user_ids: List[int]
 
+class ChatMessageCreate(BaseModel):
+    content: str
+    message_type: str = "text"
+    
 class ChatMessageResponse(BaseModel):
     message_id: int
     room_id: int
     sender_id: int
     content: str
+    message_type: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
