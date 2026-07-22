@@ -87,12 +87,12 @@ async def leave_room(db: AsyncSession, room_id: int, user_id: int):
     }, ensure_ascii=False))
   
 # DB에 메시지 저장 
-async def save_message(db: AsyncSession, room_id: int, sender_id: int, data: ChatMessageCreate):
+async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: str, message_type: str = "text"):
     new_message = ChatMessage(
         room_id=room_id,
         sender_id=sender_id,
-        content=data.content,
-        message_type=data.message_type 
+        content=content,
+        message_type= message_type 
     )
     db.add(new_message)
     await db.commit()
