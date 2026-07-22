@@ -9,7 +9,7 @@ from app.core.dependencies import get_current_user
 from app.core.security import verify_access_token
 from app.models.user_model import User
 from app.models.chat_model import ChatMessage, ChatRoom, ChatRoomMember
-from app.schemas.chat_schema import ChatRoomCreate, ChatRoomResponse, ChatRoomInvite, ChatImageMessageCreate, ChatMessageCreate
+from app.schemas.chat_schema import ChatRoomCreate, ChatRoomResponse, ChatRoomInvite, ChatImageMessageCreate
 from app.services import chat_service
 
 router = APIRouter(prefix="/chat", tags=["채팅"])
@@ -104,11 +104,11 @@ async def send_image(
     db: AsyncSession = Depends(get_async_db)
 ):
     file_url = body.image_url
-    message_data = ChatMessageCreate(content=file_url, message_type="image")
+
 
     # DB에 메시지 저장
     message = await chat_service.save_message(
-        db, room_id, current_user.user_id, message_data
+        db, room_id, current_user.user_id, file_url, message_type="image"
     )
     
     # 사진을 보낸 사람의 마지막 읽은 위치 업데이트
@@ -172,10 +172,10 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Qu
                         
                         content = payload.get("content")
                         BOT_USER_ID = -1
-                        message_data = ChatMessageCreate(content=content, message_type="text")
+                        
                         # DB에 메시지 저장 
                         new_msg = await chat_service.save_message(db, room_id, user_id, content)
-                        await chat_service.update_last_read(db, room_id, user_id, message_data)
+                        await chat_service.update_last_read(db, room_id, user_id, new_msg.message_id)
                         
                         await chat_service.manager.broadcast(room_id, json.dumps({
                             "type": "new_message",
