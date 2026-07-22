@@ -59,13 +59,14 @@ async def get_messages(room_id: int, db: AsyncSession = Depends(get_async_db)):
 
     # 읽음 위치 + 조인으로 닉네임까지 조회
     member_result = await db.execute(
-        select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id, User.nickname)
+        select(ChatRoomMember.user_id, ChatRoomMember.last_read_message_id, User.nickname, User.profile_image)
         .join(User, ChatRoomMember.user_id == User.user_id)
         .where(ChatRoomMember.room_id == room_id)
     )
     
     read_statuses = {}
     user_names = {} 
+    user_profiles = {}
 
     for row in member_result.all():
         # 읽음 상태 맵핑
@@ -73,11 +74,13 @@ async def get_messages(room_id: int, db: AsyncSession = Depends(get_async_db)):
             read_statuses[str(row.user_id)] = row.last_read_message_id
         
         user_names[str(row.user_id)] = row.nickname
+        user_profiles[str(row.user_id)] = row.profile_image
 
     return {
         "messages": messages,
         "read_statuses": read_statuses,
-        "user_names": user_names  # 💡 프론트엔드 요청 사항 반영 완료
+        "user_names": user_names,
+        "user_profiles": user_profiles
     }
 
 # 채팅방 나가기 API
@@ -102,6 +105,7 @@ async def send_image(
 ):
     file_url = body.image_url
 
+
     # DB에 메시지 저장
     message = await chat_service.save_message(
         db, room_id, current_user.user_id, file_url, message_type="image"
@@ -115,6 +119,8 @@ async def send_image(
         "type": "new_message",
         "message_id": message.message_id,
         "sender_id": current_user.user_id,
+        "sender_nickname": current_user.nickname,
+        "sender_profile_image": current_user.profile_image,
         "content": file_url,
         "message_type": "image"
     }
@@ -142,6 +148,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Qu
             return
             
         my_nickname = user.nickname
+        my_profile_image = user.profile_image
 
         # 채팅방 멤버 권한 확인
         result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
@@ -175,7 +182,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Qu
                             "message_id": new_msg.message_id,
                             "sender_id": user_id,
                             "sender_nickname": my_nickname, 
-                            "content": content
+                            "sender_profile_image": my_profile_image,
+                            "content": content,
+                            "message_type": "text"
                         }))
                         if BOT_USER_ID in room.member_ids and user_id != BOT_USER_ID:
                             is_group_chat = len(room.member_ids) > 2
