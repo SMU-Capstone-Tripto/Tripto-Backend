@@ -8,7 +8,7 @@ class NotificationResponse(BaseModel):
     content: str
     actor_id: int
     actor_nickname: str
-    actor_profile_image_url: str | None = None
+    actor_profile_image: str | None = None
     is_read: bool
     created_at: datetime
 
@@ -22,7 +22,7 @@ class NotificationResponse(BaseModel):
             content=notification.content,
             actor_id=notification.actor_id,
             actor_nickname=notification.actor.nickname,
-            actor_profile_image_url=notification.actor.profile_image_url,
+            actor_profile_image=notification.actor.profile_image,
             is_read=notification.is_read,
             created_at=notification.created_at,
         )
