@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _VOTE_TRIGGERS = [
     "투표할게", "투표 시작", "투표하자", "투표 만들어", "투표할래",
-    "투표 해줘", "이제 투표", "투표 시작해", "투표 열어", "투표 개설",
+    "투표 해줘", "이제 투표", "투표 시작해", "투표 열어", "투표 개설", "투표해줘", "투표",
 ]
 
 def _is_vote_trigger(message: str) -> bool:
@@ -73,6 +73,10 @@ _STATUS = {
 
 SESSION_TTL = 60 * 60 * 24 * 7  # 7일
 
+# 그래프 실행 중 다음 진행 상황이 이 시간 안에 안 오면 스트림을 강제 종료한다.
+# (LLM 호출이 무한정 멈춰 스레드풀을 영구 점유하는 것을 클라이언트 쪽에서라도 방어)
+STREAM_ITEM_TIMEOUT = 90
+
 _MSG_TYPE_MAP = {
     "AIMessage":     AIMessage,
     "HumanMessage":  HumanMessage,
@@ -82,7 +86,7 @@ _MSG_TYPE_MAP = {
 # (유저, 채팅방)별 인메모리 캐시 (Redis의 write-through 캐시)
 # room_id가 None이면 채팅방과 무관한 "개인 대화" 세션을 의미한다.
 _sessions: dict[tuple[int, Optional[int]], dict] = {}
-_executor = ThreadPoolExecutor(max_workers=4)
+_executor = ThreadPoolExecutor(max_workers=20)
 
 
 def _redis_key(user_id: int, room_id: Optional[int]) -> str:
@@ -286,8 +290,15 @@ async def chat_stream(
         vote_room_id: Optional[int] = None
 
         if room_id is not None:
-            room_result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
-            room = room_result.scalar_one_or_none()
+            try:
+                room_result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
+                room = room_result.scalar_one_or_none()
+            except Exception:
+                logger.exception("user_id=%s room_id=%s 채팅방 조회 실패", user_id, room_id)
+                msg = json.dumps({"type": "error", "message": "채팅방 정보를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요."}, ensure_ascii=False)
+                yield f"data: {msg}\n\n"
+                yield "data: [DONE]\n\n"
+                return
 
             if not room:
                 msg = json.dumps({"type": "error", "message": "채팅방을 찾을 수 없습니다."}, ensure_ascii=False)
@@ -359,6 +370,7 @@ async def chat_stream(
                 loop,
             )
         except Exception as e:
+            logger.exception("user_id=%s room_id=%s 그래프 실행 실패", user_id, room_id)
             asyncio.run_coroutine_threadsafe(
                 queue.put({"type": "error", "message": str(e)}),
                 loop,
@@ -367,7 +379,13 @@ async def chat_stream(
     loop.run_in_executor(_executor, _run_stream)
 
     while True:
-        item = await queue.get()
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=STREAM_ITEM_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error("user_id=%s room_id=%s 그래프 응답 시간 초과", user_id, room_id)
+            msg = json.dumps({"type": "error", "message": "응답 생성이 지연되고 있습니다. 잠시 후 다시 시도해 주세요."}, ensure_ascii=False)
+            yield f"data: {msg}\n\n"
+            break
 
         if item["type"] == "status":
             yield f"data: {json.dumps({'type': 'status', 'message': item['message']}, ensure_ascii=False)}\n\n"

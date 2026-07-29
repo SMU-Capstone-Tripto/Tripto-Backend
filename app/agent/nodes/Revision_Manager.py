@@ -252,7 +252,7 @@ def Revision_Manager(state: TravelState) -> dict:
     if not feedback or not existing:
         return {"current_step": "optimized", "itinerary_feedback": None}
 
-    llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"))
+    llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"), timeout=30)
 
     num_days = len(existing)
     labels   = _date_labels(state.get("traveldates", ""), num_days)

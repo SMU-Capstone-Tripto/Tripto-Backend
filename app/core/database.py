@@ -23,7 +23,12 @@ def get_db():
 
 # 비동기 DB
 SQLALCHEMY_DATABASE_URL_ASYNC = config('SQLALCHEMY_DATABASE_URL_ASYNC')
-async_engine = create_async_engine(SQLALCHEMY_DATABASE_URL_ASYNC)
+async_engine = create_async_engine(
+    SQLALCHEMY_DATABASE_URL_ASYNC,
+    pool_size=20,
+    max_overflow=20,
+    pool_timeout=10,
+)
 
 AsyncSessionLocal = async_sessionmaker(
     bind=async_engine,
