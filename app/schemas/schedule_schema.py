@@ -48,6 +48,7 @@ class ScheduleSummaryResponse(ScheduleBase):
 class ScheduleDetailResponse(ScheduleSummaryResponse):
     memos: List[MemoResponse] = []
 
+ScheduleSummaryResponse.model_rebuild()
 ScheduleDetailResponse.model_rebuild()
 
 class ScheduleMapPin(BaseModel):
