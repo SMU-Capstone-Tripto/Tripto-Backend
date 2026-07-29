@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.travel_model import Travel
+from app.models.schedule_model import Schedule
 from app.schemas.travel_schema import TravelCreate, TravelUpdate
 
 
@@ -22,7 +23,7 @@ async def create_travel(db: AsyncSession, data: TravelCreate, owner_id: int) -> 
 async def get_travel(db: AsyncSession, travel_id: int) -> Optional[Travel]:
     result = await db.execute(
         select(Travel)
-        .options(selectinload(Travel.schedules))
+        .options(selectinload(Travel.schedules).selectinload(Schedule.memos))
         .where(Travel.travel_id == travel_id)
     )
     return result.scalar_one_or_none()
