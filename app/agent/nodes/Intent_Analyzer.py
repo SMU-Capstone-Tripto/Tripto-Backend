@@ -205,7 +205,7 @@ def Intent_Analyzer(state: TravelState) -> dict:
         - itinerary_feedback: 일반 정보 수집 단계이므로 반드시 null로 반환해.
             """
 
-        llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"))
+        llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"), timeout=30)
         recent_messages = state.get("messages", [])[-6:]
         messages_to_llm = [SystemMessage(content=system_prompt)]
         messages_to_llm.extend(recent_messages)
@@ -237,8 +237,8 @@ def Intent_Analyzer(state: TravelState) -> dict:
                 if new_val and new_val != "NULL": result[field] = new_val
                 elif existing and existing != "NULL": result[field] = existing
             else:
-                if existing and existing != "NULL": result[field] = existing
-                elif new_val and new_val != "NULL": result[field] = new_val
+                if new_val and new_val != "NULL": result[field] = new_val
+                elif existing and existing != "NULL": result[field] = existing
 
         # itinerary_feedback은 일정이 이미 존재할 때만 추출
         new_feedback = extracted.itinerary_feedback
