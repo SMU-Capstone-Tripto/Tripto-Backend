@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.travel_model import Travel
 from app.models.schedule_model import Schedule
+from app.models.memo_model import Memo
 from app.schemas.travel_schema import TravelCreate, TravelUpdate
 
 

@@ -56,4 +56,5 @@ class Schedule(Base, TimestampMixin):
         "Memo",
         back_populates="schedule",
         cascade="all, delete-orphan",
+        lazy="selectinload",
     )
