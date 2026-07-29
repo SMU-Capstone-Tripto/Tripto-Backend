@@ -44,3 +44,5 @@ class TravelResponse(TravelBase):
 
 class TravelDetailResponse(TravelResponse): # 여행 상세 조회
     schedules: List[ScheduleSummaryResponse] = []
+
+TravelDetailResponse.model_rebuild()

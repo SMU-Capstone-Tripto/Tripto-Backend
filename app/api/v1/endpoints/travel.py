@@ -26,12 +26,7 @@ async def create_travel(
 
 @router.get("/{travel_id}", response_model=TravelDetailResponse, summary="여행 상세 조회")
 async def get_travel(travel_id: int, db: AsyncSession = Depends(get_async_db)):
-    result = await db.execute(
-        select(Travel)
-        .options(selectinload(Travel.schedules))
-        .where(Travel.travel_id == travel_id)
-    )
-    travel = result.scalar_one_or_none()
+    travel = await travel_service.get_travel(db, travel_id)
     if not travel:
         raise HTTPException(status_code=404, detail="여행을 찾을 수 없습니다.")
     return travel

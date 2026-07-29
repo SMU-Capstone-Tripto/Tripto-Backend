@@ -3,8 +3,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import selectinload, joinedload
 from sqlalchemy.future import select
 
 from app.models.travel_model import Travel
@@ -36,10 +35,11 @@ async def get_schedules_by_travel(db: AsyncSession, travel_id: int) -> List[Sche
     result = await db.execute(
         select(Schedule)
         .where(Schedule.travel_id == travel_id)
+        .options(joinedload(Schedule.travel))
         .options(selectinload(Schedule.memos))
         .order_by(Schedule.day_number, Schedule.order_index)
     )
-    return list(result.scalars().all())
+    return list(result.scalars().unique().all())
 
 
 async def update_schedule(db: AsyncSession, schedule_id: int, data: ScheduleUpdate, owner_id: int) -> Optional[Schedule]:
