@@ -43,6 +43,7 @@ class ScheduleSummaryResponse(ScheduleBase):
     travel_id: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    memo_ids: List[int] = Field(default_factory=list, description="메모 ID 리스트")
 
 class ScheduleDetailResponse(ScheduleSummaryResponse):
     memos: List[MemoResponse] = []

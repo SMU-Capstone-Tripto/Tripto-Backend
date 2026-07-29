@@ -57,3 +57,8 @@ class Schedule(Base, TimestampMixin):
         back_populates="schedule",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def memo_ids(self):
+        """메모 ID 리스트 반환"""
+        return [memo.id for memo in self.memos]

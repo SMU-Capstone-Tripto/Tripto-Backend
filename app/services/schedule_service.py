@@ -36,6 +36,7 @@ async def get_schedules_by_travel(db: AsyncSession, travel_id: int) -> List[Sche
     result = await db.execute(
         select(Schedule)
         .where(Schedule.travel_id == travel_id)
+        .options(selectinload(Schedule.memos))
         .order_by(Schedule.day_number, Schedule.order_index)
     )
     return list(result.scalars().all())
