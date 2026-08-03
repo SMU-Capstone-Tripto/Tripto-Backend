@@ -215,6 +215,7 @@ async def chat_stream(
     step == 'optimized'이면 최신 itinerary를 DB에 snapshot으로 저장.
     room_id별로 독립된 대화 세션을 사용한다 (room_id 생략 시 개인 대화).
     """
+    logger.info("chat_stream 요청 수신: user_id=%s room_id=%s message=%r", user_id, room_id, message[:50])
     session = await get_session(user_id, room_id)
 
     # ── 투표 확인 대기 중이면, 이번 메시지를 "네/아니오" 응답으로 우선 해석 ──────
