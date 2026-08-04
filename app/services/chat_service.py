@@ -162,7 +162,7 @@ async def generate_and_send_bot_reply(room_id: int, user_id: int, user_content: 
     BOT_USER_ID = -1 
     bot_nickname = "Tripto" 
     async with AsyncSessionLocal() as db:
-        stream = agent_service.chat_stream(user_id, user_content, db, nickname)
+        stream = agent_service.chat_stream(user_id, user_content, db, nickname, room_id=room_id)
 
         async for chunk in stream:
             try:
