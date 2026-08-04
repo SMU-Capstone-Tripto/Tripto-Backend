@@ -22,5 +22,4 @@ class Travel(Base, TimestampMixin):
         back_populates="travel",
         cascade="all, delete-orphan",
         order_by="Schedule.day_number, Schedule.order_index",
-        lazy="selectinload",
     )
