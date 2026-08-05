@@ -158,62 +158,80 @@ async def update_last_read(db: AsyncSession, room_id: int, user_id: int, message
         
     return False
 
+import json
+
 async def generate_and_send_bot_reply(room_id: int, user_id: int, user_content: str, nickname: str):
-    BOT_USER_ID = -1 
-    bot_nickname = "Tripto" 
+    bot_nickname = "Tripto"
+    BOT_USER_ID = -1  # 상수 값이 선언되어 있지 않다면 추가 확인 필요
+    
     async with AsyncSessionLocal() as db:
         stream = agent_service.chat_stream(user_id, user_content, db, nickname, room_id=room_id)
-
+        
         async for chunk in stream:
             try:
                 if isinstance(chunk, str):
                     chunk = chunk.strip()
                     if chunk == "data: [DONE]":
-                        break    
+                        break
                     if chunk.startswith("data: "):
-                        json_str = chunk[6:] 
+                        json_str = chunk[6:]
                         data = json.loads(json_str)
                     else:
                         data = json.loads(chunk)
                 else:
                     data = chunk
-
+                
                 event_type = data.get("type")
-
+                
                 if event_type == "status":
                     await manager.broadcast(room_id, json.dumps({
                         "type": "bot_status",
                         "sender_id": BOT_USER_ID,
                         "content": data.get("message")
                     }, ensure_ascii=False))
-
+                    
                 elif event_type == "result":
                     final_content = data.get("content")
                     step = data.get("step")
-
-                    if not final_content and step == "optimized":
+                    
+                    # 최적화 완료 시 전체 JSON 데이터를 DB에 저장
+                    msg_type = "text"
+                    if step == "optimized":
+                        plan_data = {
+                            "plan_title": data.get("plan_title", "여행 계획"),
+                            "itinerary": data.get("itinerary"),
+                            "estimated_cost": data.get("estimated_cost"),
+                            "selected_acc": data.get("selected_acc")
+                        }
+                        # DB content 컬럼에 넣기 위해 JSON을 문자열(str)로 변환
+                        final_content = json.dumps(plan_data, ensure_ascii=False)
+                        msg_type = "plan"  # 프론트가 파싱을 판단할 수 있도록 별도 타입 지정
+                        
+                    elif not final_content and step == "optimized":
                         plan_title = data.get("plan_title", "여행 계획")
                         final_content = f"🎉 '{plan_title}' 일정이 완성되었습니다! 투표를 통해 일정을 확정해 보세요."
 
-                    new_bot_msg = await save_message(db, room_id, BOT_USER_ID, final_content)
-
+                    # DB 저장 (위에서 수정한 save_message 함수에 message_type 인자 전달)
+                    new_bot_msg = await save_message(db, room_id, BOT_USER_ID, final_content, message_type=msg_type)
+                    
                     broadcast_data = {
                         "type": "new_message",
                         "message_id": new_bot_msg.message_id,
                         "sender_id": BOT_USER_ID,
                         "sender_nickname": bot_nickname,
                         "content": final_content,
+                        "message_type": msg_type, # 웹소켓에도 message_type 전달
                         "step": step,
                         "snapshot_id": data.get("snapshot_id")
                     }
                     
-                    # 최적화 완료 시 관련 UI 데이터 추가 탑재
+                    # 최적화 완료 시 관련 UI 데이터 추가 탑재 (웹소켓 데이터용)
                     if step == "optimized":
                         broadcast_data["plan_title"] = data.get("plan_title")
                         broadcast_data["itinerary"] = data.get("itinerary")
                         broadcast_data["estimated_cost"] = data.get("estimated_cost")
                         broadcast_data["selected_acc"] = data.get("selected_acc")
-
+                        
                     await manager.broadcast(room_id, json.dumps(broadcast_data, ensure_ascii=False))
                     
                 elif event_type == "error":
@@ -221,7 +239,7 @@ async def generate_and_send_bot_reply(room_id: int, user_id: int, user_content: 
                         "type": "bot_error",
                         "content": "앗, 에이전트 처리 중 문제가 발생했어요. 다시 시도해 주세요!"
                     }, ensure_ascii=False))
-
+                    
             except Exception as e:
                 print(f"챗봇 스트림 처리 중 에러: {e}")
 
