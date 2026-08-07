@@ -1,5 +1,5 @@
 from fastapi import HTTPException, WebSocket
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chat_model import ChatRoom, ChatRoomMember, ChatMessage
 from app.schemas.chat_schema import ChatMessageCreate
@@ -98,6 +98,51 @@ async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: 
     await db.commit()
     await db.refresh(new_message)
     return new_message
+
+async def delete_message(db: AsyncSession, room_id: int, user_id: int, message_id: int):
+    # 1. 삭제할 메시지가 존재하는지, 그리고 본인이 작성한 메시지가 맞는지 확인
+    result = await db.execute(
+        select(ChatMessage).where(
+            ChatMessage.message_id == message_id, 
+            ChatMessage.room_id == room_id
+        )
+    )
+    message = result.scalar_one_or_none()
+    
+    if not message:
+        raise ValueError("메시지를 찾을 수 없습니다.")
+    if message.sender_id != user_id:
+        raise ValueError("본인이 작성한 메시지만 삭제할 수 있습니다.")
+
+    # 2. 삭제할 메시지 '바로 직전'의 메시지 ID 찾기
+    prev_msg_result = await db.execute(
+        select(ChatMessage.message_id)
+        .where(
+            ChatMessage.room_id == room_id,
+            ChatMessage.message_id < message_id
+        )
+        .order_by(ChatMessage.message_id.desc())
+        .limit(1)
+    )
+    prev_msg_id = prev_msg_result.scalar_one_or_none() # 이전 메시지가 없으면 None 반환
+
+    # 3. 누군가의 마지막 읽은 메시지가 '삭제할 메시지'라면, 직전 메시지 ID로 업데이트
+    await db.execute(
+        update(ChatRoomMember)
+        .where(
+            ChatRoomMember.room_id == room_id,
+            ChatRoomMember.last_read_message_id == message_id
+        )
+        .values(last_read_message_id=prev_msg_id)
+    )
+
+    # 4. 메시지 영구 삭제 (DELETE)
+    await db.execute(
+        delete(ChatMessage).where(ChatMessage.message_id == message_id)
+    )
+    
+    await db.commit()
+    return True
 
 # 사용자가 속한 채팅방 목록, 새로운 메시지 여부 조회
 async def get_user_rooms(db: AsyncSession, user_id: int):
