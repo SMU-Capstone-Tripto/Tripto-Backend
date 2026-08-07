@@ -128,6 +128,31 @@ async def send_image(
     
     return {"message": "사진이 전송되었습니다.", "url": file_url}
 
+@router.delete("/{room_id}/messages/{message_id}", summary="메시지 삭제")
+async def delete_chat_message(
+    room_id: int,
+    message_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        # DB에서 메시지 삭제 및 last_read 갱신 처리
+        await chat_service.delete_message(db, room_id, current_user.user_id, message_id)
+        
+        # 채팅방에 접속 중인 모든 클라이언트에게 실시간 삭제 알림 브로드캐스트
+        await chat_service.manager.broadcast(room_id, json.dumps({
+            "type": "delete_message",    
+            "message_id": message_id,
+            "room_id": room_id
+        }))
+        
+        return {"message": "메시지가 삭제되었습니다."}
+        
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="메시지 삭제 중 오류가 발생했습니다.")
+
 @router.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str = Query(...)):
 
