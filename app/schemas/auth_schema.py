@@ -94,6 +94,7 @@ class UserUpdateRequest(BaseModel):
     nickname: Optional[str] = None
     tags: Optional[List[str]] = None
     profile_image: Optional[str] = Field(None, description="프로필 사진 파일")
+    fcm_token: Optional[str] = Field(None, description="FCM 푸시알림 토큰")
 
 # 비밀번호 변경(로그인 환경에서) 
 class PasswordChangeRequest(BaseModel):
