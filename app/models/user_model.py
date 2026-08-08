@@ -53,6 +53,7 @@ class User(Base):
     status_message = Column(String(100), nullable=True)
     profile_image = Column(String(512), nullable=True)
     avatar_color = Column(String(7), nullable=True)
+    fcm_token = Column(String(255), nullable=True)
     # 관계
     sent_friend_requests = relationship(
         "Friendship",
