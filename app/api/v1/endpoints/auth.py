@@ -147,8 +147,10 @@ async def update_me(
         current_user.nickname = body.nickname
     if body.tags is not None:
         current_user.tags = body.tags
-    if body.profile_image is not None: 
-        current_user.profile_image = body.profile_image    
+    if body.profile_image is not None:
+        current_user.profile_image = body.profile_image
+    if body.fcm_token is not None:
+        current_user.fcm_token = body.fcm_token
     await db.flush()
     await db.refresh(current_user)
     return UserResponse.model_validate(current_user)

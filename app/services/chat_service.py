@@ -6,6 +6,7 @@ from app.schemas.chat_schema import ChatMessageCreate
 from typing import Dict, List, Optional
 from app.services import agent_service
 from app.core.database import AsyncSessionLocal
+from app.services.notification_service import send_chat_notification
 import json 
 
 # 채팅방 생성
@@ -86,17 +87,37 @@ async def leave_room(db: AsyncSession, room_id: int, user_id: int):
         "content": f"User {user_id}님이 퇴장했습니다.",
     }, ensure_ascii=False))
   
-# DB에 메시지 저장 
+# DB에 메시지 저장
 async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: str, message_type: str = "text"):
     new_message = ChatMessage(
         room_id=room_id,
         sender_id=sender_id,
         content=content,
-        message_type= message_type 
+        message_type= message_type
     )
     db.add(new_message)
     await db.commit()
     await db.refresh(new_message)
+
+    # 푸시알림 전송
+    result = await db.execute(select(ChatRoom).where(ChatRoom.room_id == room_id))
+    room = result.scalar_one_or_none()
+    if room:
+        # 발신자 정보 조회
+        from app.models.user_model import User
+        sender_result = await db.execute(select(User).where(User.user_id == sender_id))
+        sender = sender_result.scalar_one_or_none()
+
+        if sender:
+            await send_chat_notification(
+                db=db,
+                sender_nickname=sender.nickname,
+                room_id=room_id,
+                message_content=content,
+                recipient_user_ids=room.member_ids,
+                exclude_user_id=sender_id
+            )
+
     return new_message
 
 async def delete_message(db: AsyncSession, room_id: int, user_id: int, message_id: int):
