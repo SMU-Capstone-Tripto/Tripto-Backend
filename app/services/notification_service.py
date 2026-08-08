@@ -1,13 +1,16 @@
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import WebSocket
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
+from firebase_admin import messaging
 
 from app.models.notification_model import Notification, NotificationType
+from app.models.user_model import User
 from app.schemas.notification_schema import NotificationResponse
+from app.core.firebase import get_firebase_messaging
 
 
 # 유저별 WebSocket 연결을 메모리에서 관리하는 클래스
@@ -136,3 +139,118 @@ async def mark_all_as_read(db: AsyncSession, user_id: int):
     for notification in result.scalars().all():
         notification.is_read = True
     await db.commit()
+
+
+# FCM 푸시알림 전송 함수들
+async def send_push_notification(
+    token: str,
+    title: str,
+    body: str,
+    data: Optional[dict] = None
+) -> bool:
+    """
+    단일 FCM 토큰으로 푸시알림 전송
+    """
+    fcm = get_firebase_messaging()
+    if not fcm:
+        print("Firebase not initialized. Skipping notification.")
+        return False
+
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            data=data or {},
+            token=token,
+        )
+
+        response = fcm.send(message)
+        print(f"Successfully sent message: {response}")
+        return True
+
+    except Exception as e:
+        print(f"Error sending FCM notification: {e}")
+        return False
+
+
+async def send_multicast_notification(
+    tokens: List[str],
+    title: str,
+    body: str,
+    data: Optional[dict] = None
+) -> int:
+    """
+    여러 FCM 토큰으로 푸시알림 일괄 전송
+    """
+    fcm = get_firebase_messaging()
+    if not fcm or not tokens:
+        return 0
+
+    try:
+        message = messaging.MulticastMessage(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            data=data or {},
+            tokens=tokens,
+        )
+
+        response = fcm.send_multicast(message)
+        print(f"Successfully sent {response.success_count} messages out of {len(tokens)}")
+
+        if response.failure_count > 0:
+            for idx, resp in enumerate(response.responses):
+                if not resp.success:
+                    print(f"Failed to send to token {tokens[idx]}: {resp.exception}")
+
+        return response.success_count
+
+    except Exception as e:
+        print(f"Error sending multicast FCM notification: {e}")
+        return 0
+
+
+async def send_chat_notification(
+    db: AsyncSession,
+    sender_nickname: str,
+    room_id: int,
+    message_content: str,
+    recipient_user_ids: List[int],
+    exclude_user_id: Optional[int] = None
+):
+    """
+    채팅 메시지에 대한 푸시알림 전송
+    """
+    if exclude_user_id:
+        recipient_user_ids = [uid for uid in recipient_user_ids if uid != exclude_user_id]
+
+    if not recipient_user_ids:
+        return
+
+    result = await db.execute(
+        select(User.fcm_token)
+        .where(User.user_id.in_(recipient_user_ids))
+        .where(User.fcm_token.isnot(None))
+        .where(User.is_active == True)
+    )
+
+    tokens = [row[0] for row in result.all() if row[0]]
+
+    if not tokens:
+        return
+
+    preview = message_content[:50] + "..." if len(message_content) > 50 else message_content
+
+    await send_multicast_notification(
+        tokens=tokens,
+        title=f"{sender_nickname}",
+        body=preview,
+        data={
+            "type": "chat_message",
+            "room_id": str(room_id),
+            "sender_nickname": sender_nickname,
+        }
+    )
