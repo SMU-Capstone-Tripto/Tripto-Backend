@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.api.v1.endpoints import api_router
 from app.infra.redis_client import init_redis, close_redis
 from app.core.database import async_engine as engine
+from app.core.firebase import initialize_firebase
 from app.models.base import Base
 from app.models import User, Friendship, Travel, Schedule, Memo, ChatRoom, ChatMessage, ChatRoomMember, Notification  # noqa: F401
 from app.models import ItinerarySnapshot, VoteSession, VoteRecord  # noqa: F401
@@ -16,6 +17,7 @@ from app.models import ItinerarySnapshot, VoteSession, VoteRecord  # noqa: F401
 async def lifespan(app: FastAPI):
     # 시작 시
     await init_redis()
+    initialize_firebase()
     # 개발 환경에서 테이블 자동 생성 (운영은 Alembic 사용)
     if settings.APP_ENV == "development":
         async with engine.begin() as conn:
