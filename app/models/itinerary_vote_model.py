@@ -42,10 +42,10 @@ class VoteSession(Base, TimestampMixin):
 
     vote_id             = Column(Integer, primary_key=True, autoincrement=True)
     creator_id          = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
-    vote_type           = Column(Enum(VoteType), nullable=False)
+    vote_type           = Column(Enum(VoteType, values_callable=lambda x: [e.value for e in x]), nullable=False)
     room_id             = Column(Integer, ForeignKey("chat_rooms.room_id", ondelete="SET NULL"), nullable=True)
     snapshot_ids        = Column(JSON, nullable=False)   # [snap_id, ...]
-    status              = Column(Enum(VoteStatus), nullable=False, default=VoteStatus.ACTIVE)
+    status              = Column(Enum(VoteStatus, values_callable=lambda x: [e.value for e in x]), nullable=False, default=VoteStatus.ACTIVE)
     winner_snapshot_id  = Column(Integer, ForeignKey("itinerary_snapshots.snapshot_id", ondelete="SET NULL"), nullable=True)
     expires_at          = Column(DateTime(timezone=True), nullable=True)  # group만 사용
 
