@@ -177,24 +177,13 @@ def _select_accommodation(
     return scored[0][0]
 
 
-class DailyPlan(BaseModel):
-    day: int
-    date: str
+class DaySchedule(BaseModel):
+    """일자별 LLM 호출 1건의 출력. 프롬프트를 하루 단위로 쪼개 토큰당 한도(TPM) 초과를 방지한다."""
     schedule: List[str]  # ["09:00 활동 (장소명)", "장소A → 장소B (수단·시간·요금)", ...]
 
 
-class CostBreakdown(BaseModel):
-    transportation: int
-    accommodation: int
-    meals: int
-    activities: int
-    total: int
-
-
-class OptimizedPlan(BaseModel):
-    title: str
-    daily_plans: List[DailyPlan]
-    cost_breakdown: CostBreakdown
+class FirstDaySchedule(DaySchedule):
+    title: str  # 1일차 호출에서만 여행 제목도 함께 생성
 
 
 # ── 좌표 / 거리 ─────────────────────────────────────────────────────────
@@ -416,19 +405,6 @@ def _summarize_transport(routes: list) -> str:
     return "\n".join(lines)
 
 
-def _summarize_accommodations(accommodations: list, num_people: int) -> str:
-    if not accommodations:
-        return "숙소 정보 없음"
-    lines = []
-    for a in accommodations[:5]:
-        rooms    = a.get("rooms", [])
-        suitable = [r for r in rooms if r.get("max_capacity", 0) >= num_people] or rooms
-        prices   = [r["min_price"] for r in suitable if r.get("min_price", 0) > 0]
-        price_str = f"{min(prices):,}원~" if prices else "가격미정"
-        lines.append(f"- {a.get('title', '')} ({a.get('address', '')}) | {price_str}")
-    return "\n".join(lines)
-
-
 # ── 스켈레톤 빌드 ────────────────────────────────────────────────────────
 
 def _centroid(spots: list) -> tuple[float, float] | None:
@@ -505,6 +481,145 @@ def _fix_accommodation_name(itinerary: list, correct_name: str, all_acc_titles: 
     return fixed
 
 
+def _cluster_areas(area_coords: dict[str, tuple[float, float]], target: int) -> list[list[str]]:
+    """지역 기준좌표를 target개 그룹으로 병합 (평균연결 greedy). target개 이하로 줄어들면 중단."""
+    groups: list[list[str]] = [[name] for name in area_coords]
+
+    def _centroid(g: list[str]) -> tuple[float, float] | None:
+        coords = [area_coords[n] for n in g if area_coords.get(n)]
+        if not coords:
+            return None
+        return (sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords))
+
+    while len(groups) > max(target, 1):
+        best: tuple[float, int, int] | None = None
+        for i in range(len(groups)):
+            ci = _centroid(groups[i])
+            if not ci:
+                continue
+            for j in range(i + 1, len(groups)):
+                cj = _centroid(groups[j])
+                if not cj:
+                    continue
+                d = _haversine_km(ci[0], ci[1], cj[0], cj[1])
+                if best is None or d < best[0]:
+                    best = (d, i, j)
+        if not best:
+            break
+        _, i, j = best
+        groups[i] = groups[i] + groups.pop(j)
+
+    return groups
+
+
+def _nearest_area(coord: tuple[float, float] | None, area_coords: dict[str, tuple]) -> str | None:
+    """좌표에서 가장 가까운 지역명 반환 (area 태그 없는 스팟을 지역에 귀속시킬 때 사용)"""
+    if not coord or not area_coords:
+        return None
+    best_name, best_dist = None, float("inf")
+    for name, c in area_coords.items():
+        if not c:
+            continue
+        d = _haversine_km(coord[0], coord[1], c[0], c[1])
+        if d < best_dist:
+            best_name, best_dist = name, d
+    return best_name
+
+
+def _assign_day_groups(
+    tourist_spots: list,
+    area_coords: dict[str, tuple[float, float]],
+    num_days: int,
+    acc_coord: tuple[float, float] | None,
+) -> list[list[dict]]:
+    """
+    요청 지역이 여러 개일 때 관광지를 지역별로 묶어 day 단위로 배분한다.
+    - 지역 수 <= 여행일수: 지역별 최소 1일 보장, 남는 day는 스팟이 많은 지역에 우선 배분.
+    - 지역 수 >  여행일수: 좌표상 가까운 지역끼리 병합해 여행일수만큼의 그룹으로 축소.
+    - 지역 정보가 없으면 기존 방식(전체 하나의 동선)으로 폴백.
+    """
+    if not area_coords:
+        mv_spots    = [s for s in tourist_spots if s.get("must_visit")]
+        other_spots = [s for s in tourist_spots if not s.get("must_visit")]
+        ordered = mv_spots + _sort_nearest_neighbor(other_spots, start_coord=acc_coord)
+        return _slice_by_day(ordered, num_days)
+
+    # area 태그가 없거나 알 수 없는 지역인 스팟(LLM 추천·필수방문 등)은 가장 가까운 지역으로 귀속
+    for s in tourist_spots:
+        if not s.get("area") or s["area"] not in area_coords:
+            nearest = _nearest_area(_parse_coord(s), area_coords)
+            if nearest:
+                s["area"] = nearest
+
+    target = min(len(area_coords), num_days)
+    groups = _cluster_areas(area_coords, target)
+
+    def _group_centroid(g: list[str]) -> tuple[float, float] | None:
+        coords = [area_coords[n] for n in g if area_coords.get(n)]
+        if not coords:
+            return None
+        return (sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords))
+
+    # 그룹별 관광지 정렬 (필수방문 우선 + 숙소 기준 nearest-neighbor)
+    group_spots: list[list[dict]] = []
+    for g in groups:
+        spots = [s for s in tourist_spots if s.get("area") in g]
+        mv    = [s for s in spots if s.get("must_visit")]
+        rest  = [s for s in spots if not s.get("must_visit")]
+        group_spots.append(mv + _sort_nearest_neighbor(rest, start_coord=acc_coord))
+
+    # day 배분: 기본 1일씩, 남는 day는 스팟이 많은 그룹에 우선 배정
+    base = num_days // len(groups)
+    extra = num_days % len(groups)
+    order_by_size = sorted(range(len(groups)), key=lambda i: -len(group_spots[i]))
+    days_for_group = [base] * len(groups)
+    for k in range(extra):
+        days_for_group[order_by_size[k]] += 1
+
+    # 그룹 순서: 숙소에서 가까운 그룹부터 (동선 최소화)
+    def _dist_from_acc(gi: int) -> float:
+        c = _group_centroid(groups[gi])
+        if not acc_coord or not c:
+            return 0.0
+        return _haversine_km(acc_coord[0], acc_coord[1], c[0], c[1])
+
+    groups_sorted = sorted(range(len(groups)), key=_dist_from_acc)
+
+    day_group_for_day: list[int] = []
+    for gi in groups_sorted:
+        day_group_for_day.extend([gi] * days_for_group[gi])
+    while len(day_group_for_day) < num_days:  # 반올림 오차 보정
+        day_group_for_day.append(groups_sorted[-1])
+    day_group_for_day = day_group_for_day[:num_days]
+
+    spots_per_day: list[list[dict]] = []
+    cursor = [0] * len(groups)
+    for d in range(num_days):
+        gi = day_group_for_day[d]
+        is_first = d == 0
+        is_last  = d == num_days - 1
+        pool = group_spots[gi]
+        remaining = len(pool) - cursor[gi]
+        n = min(2, remaining) if (is_first or is_last) else min(4, remaining)
+        n = max(n, 0)
+        spots_per_day.append(pool[cursor[gi]: cursor[gi] + n])
+        cursor[gi] += n
+
+    return spots_per_day
+
+
+def _slice_by_day(ordered: list[dict], num_days: int) -> list[list[dict]]:
+    spots_per_day: list[list[dict]] = []
+    idx = 0
+    for d in range(num_days):
+        is_first = d == 0
+        is_last  = d == num_days - 1
+        n = min(2, len(ordered) - idx) if (is_first or is_last) else min(4, len(ordered) - idx)
+        spots_per_day.append(ordered[idx: idx + max(n, 0)])
+        idx += max(n, 0)
+    return spots_per_day
+
+
 def _build_skeletons(
     tourist_spots: list,
     restaurants: list,
@@ -514,6 +629,7 @@ def _build_skeletons(
     origin_city: str = "",
     dest_city: str = "",
     accommodation: dict | None = None,
+    area_coords: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[str, list[list[str]]]:
     """
     모든 일자의 스켈레톤 생성.
@@ -526,20 +642,8 @@ def _build_skeletons(
     """
     acc_coord = _parse_coord(accommodation) if accommodation else None
 
-    # must_visit 장소를 앞으로 배치해 반드시 일정에 포함되도록 우선순위 부여
-    mv_spots    = [s for s in tourist_spots if s.get("must_visit")]
-    other_spots = [s for s in tourist_spots if not s.get("must_visit")]
-    sorted_spots = mv_spots + _sort_nearest_neighbor(other_spots, start_coord=acc_coord)
-
-    # 관광지를 일자별로 배분
-    spots_per_day: list[list] = []
-    idx = 0
-    for d in range(num_days):
-        is_first = d == 0
-        is_last  = d == num_days - 1
-        n = min(2, len(sorted_spots) - idx) if (is_first or is_last) else min(4, len(sorted_spots) - idx)
-        spots_per_day.append(sorted_spots[idx: idx + max(n, 0)])
-        idx += max(n, 0)
+    # 요청 지역이 여러 곳이면 지역별로 day를 묶어서 배분, 없으면 기존 방식대로 전체 하나의 동선으로 배분
+    spots_per_day = _assign_day_groups(tourist_spots, area_coords or {}, num_days, acc_coord)
 
     used_rest: set = set()
     used_cafe: set = set()
@@ -746,7 +850,7 @@ def Optimizer(state: TravelState) -> dict:
     """동선 최적화 및 예산에 맞게 일정 재구성"""
 
     city              = state.get("city", "")
-    district          = state.get("district", "")
+    districts         = state.get("districts") or []
     traveldates       = state.get("traveldates", "")
     budget_per_person = state.get("budget") or 0
     num_people        = state.get("num_people") or 1
@@ -769,9 +873,7 @@ def Optimizer(state: TravelState) -> dict:
         num_days    = 1
         date_labels = [traveldates]
 
-    must_visit         = state.get("must_visit") or []
     transport_summary  = _summarize_transport(state.get("transport_routes") or [])
-    acc_summary        = _summarize_accommodations(state.get("accommodations") or [], num_people)
     tourist_spots      = state.get("tourist_spots") or []
     restaurants        = state.get("restaurants") or []
     cafes              = state.get("cafes") or []
@@ -790,20 +892,21 @@ def Optimizer(state: TravelState) -> dict:
     accommodations = state.get("accommodations") or []
     selected_acc   = _select_accommodation(accommodations, tourist_spots, num_people, is_peak)
 
+    # 요청 지역이 여러 곳이면 지역별 기준좌표를 geocoding (day 배분 클러스터링에 사용)
+    area_coords: dict[str, tuple[float, float]] = {}
+    for d in districts:
+        coord = geocode(f"{city} {d}")
+        if coord:
+            area_coords[d] = coord
+
     # 스켈레톤 사전 계산 (이동 정보 포함)
     skeletons, day_transits = _build_skeletons(
         tourist_spots, restaurants, cafes, num_days, transport_summary,
         origin_city=origin_city, dest_city=city,
         accommodation=selected_acc,
+        area_coords=area_coords,
     )
 
-    must_visit_section = ""
-    if must_visit:
-        must_visit_section = (
-            "\n[필수 방문 장소 ★ - 예산·동선과 무관하게 반드시 일정에 포함]\n"
-            + "\n".join(f"- {p}" for p in must_visit)
-        )
-    
     # 프롬프트에 주입할 세부 피드백 섹션 정의
     feedback_section = ""
     if itinerary_feedback:
@@ -821,9 +924,9 @@ def Optimizer(state: TravelState) -> dict:
 
     is_day_trip = num_days == 1
     accommodation_rule = (
-        "5. 당일치기 여행: 숙소 체크인/체크아웃 일정 없음. 숙박비는 0원."
+        "당일치기 여행: 숙소 체크인/체크아웃 없음."
         if is_day_trip else
-        "5. 숙소는 전 기간 동일 1곳. 1일차 체크인(도착 후), 마지막날 12:00 이전 체크아웃."
+        "숙소는 전 기간 동일 1곳. 1일차 체크인, 마지막날 11:30 체크아웃."
     )
     accommodation_cost = (
         "   - accommodation: 0 (당일치기, 숙박 없음)"
@@ -876,91 +979,88 @@ def Optimizer(state: TravelState) -> dict:
     # 5. 최종 합계 재계산 (설정 예산 총액 이하로 안전하게 통제)
     total_calculated = transport_cost_total + accommodation_cost_total + meals_cost_total + activities_cost_total
 
-    system_prompt = fsystem_prompt = f"""
-                        너는 여행 일정 최적화 전문가야. 아래 **스켈레톤**을 기반으로 완성된 일정을 만들어줘.
+    # 모든 일자가 공유하는 작성 규칙 (경비 규칙은 제외 — cost_breakdown은 Python이 이미 확정 계산하므로
+    # LLM에게 요구하지 않는다. 예전엔 물어보고도 결과를 안 썼던 죽은 필드였음)
+    # 규칙 텍스트가 길고 복잡할수록 gpt-oss 계열이 도구 호출 자체를 빼먹는 경향이 실측으로 확인되어
+    # (같은 스켈레톤에서 규칙만 줄이면 성공률 100%) 핵심만 남기고 최대한 짧게 유지한다.
+    shared_rules = f"""
+                        [작성 규칙]
+                        1. 스켈레톤의 장소 순서·이름을 그대로 사용. 생략·순서변경·이름교체 금지. 필수방문 장소(★)는 반드시 포함.
+                        2. schedule 줄은 세 형식만 사용:
+                        - "HH:MM 장소명 도착/출발/귀환/체크인/체크아웃" (단일 시각 이벤트)
+                        - "HH:MM~HH:MM 활동내용 (장소명)" (관광/식사/카페 — 시간범위)
+                        - "장소A → 장소B (이동수단·시간)" (이동 — 시각 표기 금지)
+                        3. 아침 09:00~10:00, 점심 13:00~14:00, 저녁 18:00~19:00 고정. 관광 75분, 카페 45분 기준.
+                           빈 시간은 새 장소 대신 직전 장소 체류를 늘려서 채우기 (공백 금지).
+                        4. 저녁 식사 후 숙소로 귀환(마지막날 제외). {accommodation_rule}
+                        5. 교통편·체크인/체크아웃은 Python이 자동 처리하므로 schedule에 추가하지 말 것.
+                    """
+
+    llm = ChatGroq(
+        model="openai/gpt-oss-20b",
+        api_key=os.getenv("GROQ_API_KEY"),
+        timeout=30,
+        max_tokens=4000,
+        # gpt-oss는 답을 내기 전 내부적으로 reasoning 토큰을 먼저 소모하는 추론 모델이라,
+        # effort가 기본값이면 reasoning만 하다 max_tokens를 다 써버려 정작 도구 호출을 못 하고
+        # 실패하는 경우가 실측으로 확인됨. low로 낮춰 reasoning 토큰을 줄인다.
+        reasoning_effort="low",
+    )
+
+    # 일자별로 LLM을 나눠 호출한다 — 3일치를 한 번에 요청하면 프롬프트+응답 합계가
+    # Groq 무료티어 TPM(분당 토큰) 한도를 넘어 요청 자체가 거부되거나 응답이 중간에 잘렸다.
+    # 하루씩 쪼개면 호출당 토큰량이 작아져 한도 안에 안전하게 들어온다.
+    day_skeletons = skeletons.split("\n\n")
+    plan_title = f"{city} 여행"
+    daily_schedules: list[list[str]] = []
+    generation_failed = False
+
+    for d in range(num_days):
+        is_first = d == 0
+        day_skel = day_skeletons[d] if d < len(day_skeletons) else ""
+
+        day_prompt = f"""
+                        너는 여행 일정 최적화 전문가야. 아래 **스켈레톤**을 기반으로 {d + 1}일차({date_labels[d]}) 하루치 일정만 완성해줘.
                         스켈레톤의 장소 순서와 이동 정보는 이미 최적화되어 있으니 그대로 사용할 것.
 
                         [여행 기본 정보]
                         - 출발지: {origin_city}
-                        - 목적지: {city} {district or ""}
-                        - 여행 기간: {traveldates} ({num_days}일)
-                        - 인원: {num_people}명
-                        - 1인당 예산: {budget_per_person:,}원 → 총 예산: {budget:,}원
-                        - 선호 스타일: {', '.join(preferences) if preferences else '없음'}
-                        - 일자별 날짜: {', '.join(date_labels)}
+                        - 목적지: {city} {'/'.join(districts) if districts else ''}
+                        - 인원: {num_people}명 / 선호 스타일: {', '.join(preferences) if preferences else '없음'}
 
-                        [숙소 후보]
-                        {acc_summary}
-                        {must_visit_section}
-
-                        [일정 스켈레톤]
-                        {skeletons}
-
-                        [작성 규칙]
-                        1. 스켈레톤의 장소 순서·식사 장소·'→ 이동:' 줄을 그대로 사용할 것. 순서 변경·생략·식당명 교체 금지.
-                           - 중복 방지: 같은 장소가 두 번 등장하면 나중 항목을 삭제하고 직전 장소 체류 연장으로 채울 것.
-                           - [★중요] 2일차 이후 포함 모든 일차의 식당·관광지명은 반드시 스켈레톤에 명시된 고유 명칭을 그대로 사용할 것.
-                             '식당', '근처 식당', '맛집', '관광지' 같은 일반 명칭 절대 금지. 스켈레톤에 없는 장소 임의 추가 금지.
-                             - 스켈레톤에 '현지 식당 (직접 검색 추천)' 또는 '현지 카페 (직접 검색 추천)'로 표시된 항목은 그 문구를 그대로 사용할 것. 임의의 식당명·카페명으로 교체 절대 금지.
-                        2. schedule 항목은 세 종류:
-                        ① 이벤트 항목 (단일 시각): "HH:MM [장소명] [도착/출발/귀환/체크인/체크아웃]"
-                           - 장소에 처음 도착하거나 떠날 때 사용. 시간 범위 없음.
-                        ② 활동 항목 (시간 범위): "HH:MM~HH:MM 활동내용 (장소명)"
-                           - 관광·식사·카페 등 체류 활동. 반드시 시작~종료 시간 명시.
-                           - [★절대 금지] "HH:MM~HH:MM 이동 (버스)" 처럼 이동을 ② 활동 항목으로 표기 금지. 이동은 반드시 ③ 형식만 사용.
-                        ③ 이동 항목 (타임스탬프 없음): "장소A → 장소B (대중교통 정보 / 택시 정보)"
-                        ★ 이동 항목에 타임스탬프 절대 금지. 도착 시각은 ① 이벤트 항목으로 별도 표시.
-                        
-                        3. [★중요 - 식사 시간 고정 규칙]
-                        하루에 아침, 점심, 저녁 세 끼 식사 시간을 아래 시각에 정확히 맞추어 일정을 전개해야 함:
-                        - 아침 식사: 반드시 "09:00~10:00 아침 식사 (식당명)"으로 고정
-                        - 점심 식사: 반드시 "13:00~14:00 점심 식사 (식당명)"으로 고정
-                        - 저녁 식사: 반드시 "18:00~19:00 저녁 식사 (식당명)"으로 고정
-                        * 식사 시작 시각에 맞추기 위해 직전 관광 활동 종료 시각과 이동 시간을 조밀하게 계산할 것.
-
-                        4. 활동별 표준 소요시간:
-                        - 관광지: 60~90분 / 식사: 60분 고정 / 카페: 30분~2시간 (다음 식사 시작 전까지 체류 연장 가능)
-                        - 공백이 생기면 새 장소를 만들지 말고 카페·관광지 체류 시간을 연장해서 채울 것.
-                        - 숙소 체크인: "HH:MM 숙소명 체크인" (15:00 고정) / 체크아웃: "HH:MM 숙소명 체크아웃" (11:30)
-
-                        5. 시간 배정 원칙 (연속 흐름 — 공백 금지):
-                        - 각 이벤트 시각 = 이전 활동 종료 시각 + 이동 소요시간. 30분 이상 공백 절대 금지.
-                        - 식사 고정 시각 사이에 비는 시간이 발생할 경우, 이전 장소 체류를 연장하여 시간을 촘촘하게 연결할 것.
-                        - "자유 시간" 항목은 하루 최대 1회만 허용. 두 번째부터는 이전 활동 체류 시간 연장으로 대체할 것.
-                        - "자유 시간" 장소는 반드시 스켈레톤에 있는 실제 관광지·카페 인근으로만 표기할 것.
-
-                        6. 매일(마지막날 제외) 저녁 식사 후 반드시 숙소 귀환:
-                        - "저녁식당 → 숙소명 (이동정보)" (③ 이동 항목)
-                        - "HH:MM 숙소명 귀환" (① 이벤트 항목, 20:00~22:00 범위)
-
-                        {accommodation_rule}
-                        7. 필수 방문 장소(★)가 있으면 반드시 포함
-
-                        8. [★중요 - 경비 산출 규칙]
-                        cost_breakdown 항목은 계산 규칙을 무시하고 절대 임의의 숫자를 지어내거나 뻥튀기하지 마라.
-                        반드시 아래에 지정된 숫자를 **그대로** 복사해서 출력해라:
-                        - transportation: {transport_cost_total}  (KTX 왕복 교통비만 한정 반영된 총액)
-                        - accommodation: {accommodation_cost_total}
-                        - meals: {meals_cost_total}  (1인 1끼 15,000원 기준 고정 총액)
-                        - activities: {activities_cost_total}
-                        - total: {total_calculated}
-
-                        9. title: 여행지와 테마가 담긴 매력적인 한국어 제목
-                        10. 출발/귀환 교통편은 Python이 자동 삽입하므로 schedule에 추가하지 말 것.
+                        [{d + 1}일차 스켈레톤]
+                        {day_skel}
+                        {feedback_section}
+                        {shared_rules}
+                        {"6. title: 여행지와 테마가 담긴 매력적인 한국어 제목도 함께 작성." if is_first else ""}
                     """
 
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        api_key=os.getenv("GROQ_API_KEY"),
-        timeout=30,
-    )
+        schema = FirstDaySchedule if is_first else DaySchedule
+        messages = [
+            SystemMessage(content=day_prompt),
+            HumanMessage(content=f"{d + 1}일차 일정을 스켈레톤 기반으로 완성해줘."),
+        ]
 
-    try:
-        plan: OptimizedPlan = llm.with_structured_output(OptimizedPlan).invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content="위 스켈레톤을 기반으로 최적화된 여행 계획을 완성해줘."),
-        ])
-    except Exception:
+        # gpt-oss-20b가 이따금 tool call 자체를 빼먹는 경우가 있어 여러 번 재시도
+        _MAX_ATTEMPTS = 3
+        day_result = None
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                day_result = llm.with_structured_output(schema).invoke(messages)
+                break
+            except Exception:
+                if attempt == _MAX_ATTEMPTS - 1:
+                    generation_failed = True
+                continue
+
+        if generation_failed:
+            break
+
+        daily_schedules.append(list(day_result.schedule))
+        if is_first:
+            plan_title = day_result.title
+
+    if generation_failed:
         return {
             "current_step": "optimized",
             "plan_title": f"{city} 여행",
@@ -979,13 +1079,12 @@ def Optimizer(state: TravelState) -> dict:
     )
 
     itinerary = []
-    for dp in plan.daily_plans:
-        day_idx  = dp.day - 1
+    for day_idx, day_schedule in enumerate(daily_schedules):
         is_first = day_idx == 0
         is_last  = day_idx == num_days - 1
 
         # ── _inject_transits 실행 전 LLM 출력 형식 정규화 ───────────────
-        raw = _normalize_schedule(list(dp.schedule))
+        raw = _normalize_schedule(list(day_schedule))
 
         # ② 1일차: LLM이 생성한 광역 이동 줄(→) 및 단일 이벤트(도착/출발) 제거
         if is_first and origin_city:
@@ -1010,7 +1109,7 @@ def Optimizer(state: TravelState) -> dict:
         if is_last and not is_first and return_seq:
             schedule.extend(return_seq)
 
-        itinerary.append(f"[{dp.day}일차 | {dp.date}]\n" + "\n".join(schedule))
+        itinerary.append(f"[{day_idx + 1}일차 | {date_labels[day_idx]}]\n" + "\n".join(schedule))
 
     # 숙소명 후처리: LLM이 바꾼 숙소명을 selected_acc로 강제 교정
     if selected_acc and not is_day_trip:
@@ -1029,7 +1128,7 @@ def Optimizer(state: TravelState) -> dict:
     history = list(state.get("itinerary_history") or [])
     new_snap = {
         "version":        len(history) + 1,
-        "plan_title":     plan.title,
+        "plan_title":     plan_title,
         "itinerary":      itinerary,
         "estimated_cost": estimated_cost,
         "selected_acc":   selected_acc,
@@ -1041,7 +1140,7 @@ def Optimizer(state: TravelState) -> dict:
 
     return {
         "current_step":     "optimized",
-        "plan_title":       plan.title,
+        "plan_title":       plan_title,
         "itinerary":        itinerary,
         "itinerary_history": itinerary_history,
         "itinerary_feedback": None,

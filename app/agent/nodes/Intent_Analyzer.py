@@ -2,7 +2,7 @@ import os
 import re
 from dotenv import load_dotenv
 
-from typing import Optional, Union
+from typing import Optional, Union, List
 from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_groq import ChatGroq
@@ -93,9 +93,18 @@ def _needs_llm(state: TravelState, user_input: str, year: str) -> tuple[bool, Op
 
 
 
+_DISTRICT_SPLIT = re.compile(r"[,、/]|이랑|랑|하고|와|과(?=\s|$)")
+
+
+def _split_districts(text: str) -> list[str]:
+    """'남포동이랑 송도' 같은 단일 문자열을 지역 리스트로 분리"""
+    parts = [p.strip() for p in _DISTRICT_SPLIT.split(text)]
+    return [p for p in parts if p]
+
+
 class TravelInfo(BaseModel):
     city: Optional[str] = None
-    district: Optional[str] = None
+    districts: Optional[List[str]] = None
     traveldates: Optional[str] = None
     budget: Optional[int] = None
     preferences: Optional[list[str]] = None
@@ -110,11 +119,15 @@ class TravelInfo(BaseModel):
         # must_visit이 존재하고, 그 값이 문자열(str) 타입이라면 리스트로 감싸줍니다.
         if "must_visit" in data and isinstance(data["must_visit"], str):
             data["must_visit"] = [data["must_visit"]]
-            
+
         # (선택 사항) preferences 필드도 혹시 모를 문자열 오작동을 방지하려면 함께 넣어줍니다.
         if "preferences" in data and isinstance(data["preferences"], str):
             data["preferences"] = [data["preferences"]]
-            
+
+        # districts가 문자열("남포동이랑 송도")로 오면 리스트로 분리
+        if "districts" in data and isinstance(data["districts"], str):
+            data["districts"] = _split_districts(data["districts"])
+
         # 부모 클래스(BaseModel)의 초기화 메서드를 호출하여 최종 검증 및 저장을 완료합니다.
         super().__init__(**data)
 
@@ -148,9 +161,11 @@ def Intent_Analyzer(state: TravelState) -> dict:
     if call_llm:
         already_known = {
             k: state.get(k)
-            for k in ["city", "district", "traveldates", "budget", "origin_city", "num_people"]
+            for k in ["city", "traveldates", "budget", "origin_city", "num_people"]
             if state.get(k) and state.get(k) != "NULL"
         }
+        if state.get("districts"):
+            already_known["districts"] = state.get("districts")
         if state.get("preferences"):
             already_known["preferences"] = state.get("preferences")
             
@@ -169,7 +184,7 @@ def Intent_Analyzer(state: TravelState) -> dict:
         추출할 필드:
         - 출발지 시 단위 (origin_city)
         - 목적지 시 단위 (city)
-        - 목적지 읍면동 단위 (district)
+        - 목적지 읍면동 단위 리스트 (districts): 여러 지역을 언급하면 모두 리스트로 담을 것 (예: ["남포동", "송도"])
         - 여행일정 (traveldates)
         - 예산 (budget): 반드시 1인당 예산 숫자만 (총액 아님, 인원 수로 나누거나 곱하지 말 것)
         - 여행 인원 수 (num_people)
@@ -195,7 +210,7 @@ def Intent_Analyzer(state: TravelState) -> dict:
 
         추출할 필드:
         - city: 목적지 시 단위
-        - district: 목적지 읍면동 단위
+        - districts: 목적지 읍면동 단위 리스트. 여러 지역을 언급하면 모두 리스트로 담을 것 (예: ["남포동", "송도"])
         - traveldates: 여행 일정 포맷은 반드시 'YYYY-MM-DD ~ YYYY-MM-DD' 형식이어야 함 (예: 2박 3일이면 종료일 계산 필수)
         - budget: 1인당 예산 (숫자만 추출)
         - origin_city: 출발지 시 단위
@@ -205,7 +220,7 @@ def Intent_Analyzer(state: TravelState) -> dict:
         - itinerary_feedback: 일반 정보 수집 단계이므로 반드시 null로 반환해.
             """
 
-        llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"), timeout=30)
+        llm = ChatGroq(model="openai/gpt-oss-20b", api_key=os.getenv("GROQ_API_KEY"), timeout=30, reasoning_effort="low")
         recent_messages = state.get("messages", [])[-6:]
         messages_to_llm = [SystemMessage(content=system_prompt)]
         messages_to_llm.extend(recent_messages)
@@ -214,13 +229,9 @@ def Intent_Analyzer(state: TravelState) -> dict:
         extracted = llm.with_structured_output(TravelInfo).invoke(messages_to_llm)
 
         # 기존 일반 필드 병합 로직 (기존과 동일)
-        for field in ["city", "district", "traveldates", "budget", "origin_city", "num_people"]:
+        for field in ["city", "traveldates", "budget", "origin_city", "num_people"]:
             existing = state.get(field)
             new_val = getattr(extracted, field, None)
-            if field == "district" and isinstance(new_val, str):
-                normalized = new_val.replace(" ", "")
-                if normalized in _NONE_DISTRICT:
-                    new_val = None
 
             if is_correction:
                 # optimized 상태에서 budget은 예산 관련 명시 키워드가 있을 때만 업데이트
@@ -254,12 +265,20 @@ def Intent_Analyzer(state: TravelState) -> dict:
         result["preferences"] = list(set((state.get("preferences") or []) + (extracted.preferences or [])))
         result["must_visit"] = list(set((state.get("must_visit") or []) + (extracted.must_visit or [])))
 
+        # districts 병합: "없음"류 응답 제외 후 기존 리스트에 누적 (preferences/must_visit과 동일 패턴)
+        new_districts = [
+            d for d in (extracted.districts or [])
+            if d.replace(" ", "") not in _NONE_DISTRICT
+        ]
+        result["districts"] = list(dict.fromkeys((state.get("districts") or []) + new_districts))
+
     else:
         # LLM 없이 처리 규칙 (기존 코드에 필드 유지 추가)
-        for field in ["city", "district", "traveldates", "budget", "origin_city", "num_people"]:
+        for field in ["city", "traveldates", "budget", "origin_city", "num_people"]:
             val = state.get(field)
             if val and val != "NULL": result[field] = val
         if regex_date: result["traveldates"] = regex_date
+        result["districts"] = state.get("districts") or []
         result["preferences"] = state.get("preferences") or []
         result["must_visit"] = state.get("must_visit") or []
         result["itinerary_feedback"] = state.get("itinerary_feedback") # 유지

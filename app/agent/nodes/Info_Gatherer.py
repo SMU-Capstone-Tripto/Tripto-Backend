@@ -11,7 +11,7 @@ REQUIRED_FIELDS = {
     "num_people": "몇 명이서 여행하시나요? (예시: 2명, 4명)",
 }
 
-DISTRICT_QUESTION = "여행지의 상세 위치도 알려주실 수 있나요? (읍/면/동 단위, 없으면 '없음'이라고 말씀해주세요)"
+DISTRICT_QUESTION = "여행지의 상세 위치도 알려주실 수 있나요? (읍/면/동 단위, 여러 곳이면 모두 알려주세요. 없으면 '없음'이라고 말씀해주세요)"
 
 
 def _district_already_asked(state: TravelState) -> bool:
@@ -66,8 +66,8 @@ def Info_Gatherer(state: TravelState) -> dict:
             "messages": [AIMessage(content=bot_msg)],
         }
 
-    # 필수 정보 완료 → district가 없고 아직 안 물어봤으면 한 번만 질문
-    if not state.get("district") and not _district_already_asked(state):
+    # 필수 정보 완료 → districts가 없고 아직 안 물어봤으면 한 번만 질문
+    if not state.get("districts") and not _district_already_asked(state):
         return {
             "current_step": "asking_info",
             "messages": [AIMessage(content=DISTRICT_QUESTION)],

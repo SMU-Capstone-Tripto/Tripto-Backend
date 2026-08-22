@@ -1,5 +1,16 @@
+from datetime import datetime
 from langchain_core.messages import AIMessage
 from state import TravelState
+
+
+def _parse_num_days(traveldates: str) -> int | None:
+    try:
+        start_str, end_str = traveldates.split("~")
+        start = datetime.strptime(start_str.strip(), "%Y-%m-%d")
+        end   = datetime.strptime(end_str.strip(), "%Y-%m-%d")
+        return (end - start).days + 1
+    except Exception:
+        return None
 
 
 def Confirmer(state: TravelState) -> dict:
@@ -22,7 +33,7 @@ def Confirmer(state: TravelState) -> dict:
 
     # 초기 여행 정보 확인
     city        = state.get("city", "")
-    district    = state.get("district", "")
+    districts   = state.get("districts") or []
     traveldates = state.get("traveldates", "")
     num_people  = state.get("num_people", 0)
     budget      = state.get("budget", 0)
@@ -30,7 +41,7 @@ def Confirmer(state: TravelState) -> dict:
     preferences = state.get("preferences") or []
     must_visit  = state.get("must_visit") or []
 
-    destination = f"{city} {district}".strip() if district else city
+    destination = f"{city} {'/'.join(districts)}".strip() if districts else city
 
     lines = ["아래 정보로 여행 계획을 시작할게요! 확인해 주세요.\n"]
     lines.append(f"• 출발지: {origin_city}")
@@ -42,6 +53,17 @@ def Confirmer(state: TravelState) -> dict:
         lines.append(f"• 선호 스타일: {', '.join(preferences)}")
     if must_visit:
         lines.append(f"• 필수 방문: {', '.join(must_visit)}")
+
+    # 지역 수가 여행일수보다 많으면 사전 경고 (가까운 지역끼리 자동으로 묶어서 진행됨을 안내)
+    if len(districts) > 1:
+        num_days = _parse_num_days(traveldates)
+        if num_days and len(districts) > num_days:
+            lines.append(
+                f"\n⚠️ {num_days}일 일정에 {len(districts)}개 지역({', '.join(districts)})을 "
+                "모두 넉넉히 돌기엔 빠듯할 수 있어요. 가까운 지역끼리 묶어서 진행할게요. "
+                "특정 지역을 빼거나 일정을 늘리고 싶으면 말씀해주세요."
+            )
+
     lines.append("\n정보가 맞으면 '네'를, 수정이 필요하면 수정 내용을 알려주세요.")
 
     return {

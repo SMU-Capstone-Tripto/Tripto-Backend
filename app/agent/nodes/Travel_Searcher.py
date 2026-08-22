@@ -70,10 +70,10 @@ def _parse_room(room: dict) -> dict:
 
 
 def Travel_Searcher(state: TravelState) -> dict:
-    """한국관광공사 API로 숙소 정보 검색 (contentTypeId=32)"""
+    """한국관광공사 API로 숙소 정보 검색 (contentTypeId=32). districts가 여러 개면 지역별로 검색해 병합."""
 
     city        = state.get("city")
-    district    = state.get("district")
+    districts   = state.get("districts") or []
     budget      = state.get("budget")
     num_people  = state.get("num_people") or 1
     traveldates = state.get("traveldates") or ""
@@ -82,16 +82,7 @@ def Travel_Searcher(state: TravelState) -> dict:
     if not city:
         return {"current_step": "searching", "accommodations": []}
 
-    sido_code, sigungu_code = find_area_codes(city, district)
-    if not sido_code:
-        return {"current_step": "searching", "accommodations": []}
-
-    num_rows = 100 if district else 30
-    try:
-        raw_list = fetch_area_list(sido_code, "32", sigungu_code, num_rows=num_rows, arrange="B")
-    except Exception:
-        return {"current_step": "searching", "accommodations": []}
-
+    search_targets = districts or [None]
     total_budget = (budget or 0) * num_people
 
     def _eff(room: dict) -> int:
@@ -100,7 +91,7 @@ def Travel_Searcher(state: TravelState) -> dict:
             return room.get("peak_price") or room.get("min_price") or 0
         return room.get("min_price") or 0
 
-    def _fetch_one(item: dict):
+    def _fetch_one(item: dict, district: str | None):
         content_id = item.get("contentid", "")
         try:
             rooms_raw = fetch_detail_info(content_id, "32")
@@ -123,16 +114,37 @@ def Travel_Searcher(state: TravelState) -> dict:
             "mapx":       str(item.get("mapx", "")),
             "mapy":       str(item.get("mapy", "")),
             "rooms":      rooms,
+            "area":       district,
         }
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(_fetch_one, item) for item in raw_list[:50]]
-        accommodations = [r for f in futures for r in [f.result()] if r is not None]
+    seen_titles: set[str] = set()
+    accommodations: list[dict] = []
 
-    if district:
-        filtered = [a for a in accommodations if _district_match(district, a.get("address", ""))]
-        if filtered:
-            accommodations = filtered
+    for district in search_targets:
+        sido_code, sigungu_code = find_area_codes(city, district)
+        if not sido_code:
+            continue
+
+        num_rows = 100 if district else 30
+        try:
+            raw_list = fetch_area_list(sido_code, "32", sigungu_code, num_rows=num_rows, arrange="B")
+        except Exception:
+            continue
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(_fetch_one, item, district) for item in raw_list[:50]]
+            fetched = [f.result() for f in futures]
+
+        if district:
+            filtered = [a for a in fetched if _district_match(district, a.get("address", ""))]
+            if filtered:
+                fetched = filtered
+
+        for a in fetched:
+            title = a.get("title", "")
+            if title and title not in seen_titles:
+                seen_titles.add(title)
+                accommodations.append(a)
 
     if budget:
         def _sort_key(a: dict) -> float:
