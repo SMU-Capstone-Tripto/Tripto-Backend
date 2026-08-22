@@ -234,8 +234,33 @@ async def finalize_vote(
     return travel
 
 
-async def get_active_votes(db: AsyncSession, user_id: int) -> List[VoteSession]:
-    """내가 만들었거나 내가 속한 채팅방의 활성 투표 목록"""
+async def _assert_room_member(db: AsyncSession, room_id: int, user_id: int) -> None:
+    result = await db.execute(
+        select(ChatRoomMember).where(
+            ChatRoomMember.room_id == room_id,
+            ChatRoomMember.user_id == user_id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="해당 채팅방의 멤버가 아닙니다.")
+
+
+async def get_active_votes(
+    db: AsyncSession, user_id: int, room_id: Optional[int] = None
+) -> List[VoteSession]:
+    """활성 투표 목록. room_id 지정 시 해당 채팅방의 투표만 반환."""
+    if room_id is not None:
+        await _assert_room_member(db, room_id, user_id)
+        result = await db.execute(
+            select(VoteSession)
+            .options(selectinload(VoteSession.records))
+            .where(
+                VoteSession.room_id == room_id,
+                VoteSession.status == VoteStatus.ACTIVE,
+            )
+        )
+        return list(result.scalars().all())
+
     my_result = await db.execute(
         select(VoteSession)
         .options(selectinload(VoteSession.records))
@@ -263,4 +288,52 @@ async def get_active_votes(db: AsyncSession, user_id: int) -> List[VoteSession]:
         )
         my_sessions += list(group_result.scalars().all())
 
+    return my_sessions
+
+
+async def get_finalized_votes(
+    db: AsyncSession, user_id: int, room_id: Optional[int] = None
+) -> List[VoteSession]:
+    """완료된(확정) 투표 목록, 최신순. room_id 지정 시 해당 채팅방의 투표만 반환."""
+    if room_id is not None:
+        await _assert_room_member(db, room_id, user_id)
+        result = await db.execute(
+            select(VoteSession)
+            .options(selectinload(VoteSession.records))
+            .where(
+                VoteSession.room_id == room_id,
+                VoteSession.status == VoteStatus.FINALIZED,
+            )
+            .order_by(VoteSession.updated_at.desc())
+        )
+        return list(result.scalars().all())
+
+    my_result = await db.execute(
+        select(VoteSession)
+        .options(selectinload(VoteSession.records))
+        .where(
+            VoteSession.creator_id == user_id,
+            VoteSession.status == VoteStatus.FINALIZED,
+        )
+    )
+    my_sessions = list(my_result.scalars().all())
+
+    my_rooms_result = await db.execute(
+        select(ChatRoomMember.room_id).where(ChatRoomMember.user_id == user_id)
+    )
+    my_room_ids = [r for r in my_rooms_result.scalars().all()]
+
+    if my_room_ids:
+        group_result = await db.execute(
+            select(VoteSession)
+            .options(selectinload(VoteSession.records))
+            .where(
+                VoteSession.room_id.in_(my_room_ids),
+                VoteSession.status == VoteStatus.FINALIZED,
+                VoteSession.creator_id != user_id,
+            )
+        )
+        my_sessions += list(group_result.scalars().all())
+
+    my_sessions.sort(key=lambda s: s.updated_at, reverse=True)
     return my_sessions

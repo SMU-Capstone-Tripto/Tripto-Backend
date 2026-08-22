@@ -36,6 +36,7 @@ class VoteSessionResponse(BaseModel):
     vote_id: int
     vote_type: str
     status: str
+    room_id: Optional[int]          # group 투표만 값 있음, solo는 None
     snapshots: List[SnapshotOut]
     results: List[VoteResultItem]
     my_vote: Optional[int]          # 내가 투표한 snapshot_id, 없으면 None
