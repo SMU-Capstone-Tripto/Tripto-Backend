@@ -1,6 +1,6 @@
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
@@ -61,11 +61,33 @@ async def create_vote(
 # ── 정적 경로를 동적 경로보다 먼저 등록 (Fix 1) ──────────────────────────
 @router.get("/active", response_model=List[VoteSessionResponse], summary="참여 대기 중인 투표 목록")
 async def list_active_votes(
+    room_id: Optional[int] = Query(None, description="지정하면 해당 채팅방의 투표만 반환합니다."),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """내가 만들었거나 내가 속한 채팅방의 활성 투표 목록을 반환합니다."""
-    sessions = await vote_service.get_active_votes(db, current_user.user_id)
+    """
+    활성 투표 목록을 반환합니다.
+
+    - room_id 미지정: 내가 만들었거나 내가 속한 모든 채팅방의 활성 투표를 합쳐서 반환합니다.
+    - room_id 지정: 해당 채팅방의 활성 투표만 반환합니다(해당 방 멤버만 조회 가능).
+    """
+    sessions = await vote_service.get_active_votes(db, current_user.user_id, room_id=room_id)
+    return [await _build_response(db, s, current_user.user_id) for s in sessions]
+
+
+@router.get("/finalized", response_model=List[VoteSessionResponse], summary="완료된 투표 목록")
+async def list_finalized_votes(
+    room_id: Optional[int] = Query(None, description="지정하면 해당 채팅방의 투표만 반환합니다."),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    완료(확정)된 투표 목록을 최신순으로 반환합니다.
+
+    - room_id 미지정: 내가 만들었거나 내가 속한 모든 채팅방의 완료된 투표를 합쳐서 반환합니다.
+    - room_id 지정: 해당 채팅방의 완료된 투표만 반환합니다(해당 방 멤버만 조회 가능).
+    """
+    sessions = await vote_service.get_finalized_votes(db, current_user.user_id, room_id=room_id)
     return [await _build_response(db, s, current_user.user_id) for s in sessions]
 
 
@@ -169,6 +191,7 @@ async def _build_response(db: AsyncSession, vote_session, user_id: int) -> VoteS
         vote_id=vote_session.vote_id,
         vote_type=vote_session.vote_type.value,
         status=vote_session.status.value,
+        room_id=vote_session.room_id,
         snapshots=snapshots_out,
         results=results,
         my_vote=my_vote,
