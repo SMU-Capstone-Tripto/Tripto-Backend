@@ -27,45 +27,59 @@ def _is_non_tourist(title: str) -> bool:
 
 
 def Tourist_Searcher(state: TravelState) -> dict:
-    """한국관광공사 API로 관광지 정보 검색 (contentTypeId=12)"""
+    """한국관광공사 API로 관광지 정보 검색 (contentTypeId=12). districts가 여러 개면 지역별로 검색해 병합."""
 
     city = state.get("city")
-    district = state.get("district")
+    districts = state.get("districts") or []
 
     if not city:
         return {"current_step": "searching", "tourist_spots": []}
 
-    sido_code, sigungu_code = find_area_codes(city, district)
-    if not sido_code:
-        return {"current_step": "searching", "tourist_spots": []}
+    # 지역 미지정 시 도시 전체 검색 (기존 동작 유지)
+    search_targets = districts or [None]
 
-    num_rows = 100 if district else 30
-    try:
-        raw_list = fetch_area_list(sido_code, "12", sigungu_code, num_rows=num_rows)
-    except Exception:
-        return {"current_step": "searching", "tourist_spots": []}
+    seen_titles: set[str] = set()
+    tourist_spots: list[dict] = []
 
-    tourist_spots = [
-        {
-            "title": item.get("title", ""),
-            "address": (item.get("addr1", "") + " " + item.get("addr2", "")).strip(),
-            "tel": item.get("tel", ""),
-            "image": item.get("firstimage", ""),
-            "content_id": item.get("contentid", ""),
-            "category": item.get("cat3", ""),
-            "mapx": item.get("mapx", ""),
-            "mapy": item.get("mapy", ""),
-        }
-        for item in raw_list
-    ]
+    for district in search_targets:
+        sido_code, sigungu_code = find_area_codes(city, district)
+        if not sido_code:
+            continue
 
-    # 식당·주점·병원 등 비관광지 제거
-    tourist_spots = [t for t in tourist_spots if not _is_non_tourist(t.get("title", ""))]
+        num_rows = 100 if district else 30
+        try:
+            raw_list = fetch_area_list(sido_code, "12", sigungu_code, num_rows=num_rows)
+        except Exception:
+            continue
 
-    if district:
-        filtered = [t for t in tourist_spots if _district_match(district, t.get("address", ""))]
-        if filtered:
-            tourist_spots = filtered
+        spots = [
+            {
+                "title": item.get("title", ""),
+                "address": (item.get("addr1", "") + " " + item.get("addr2", "")).strip(),
+                "tel": item.get("tel", ""),
+                "image": item.get("firstimage", ""),
+                "content_id": item.get("contentid", ""),
+                "category": item.get("cat3", ""),
+                "mapx": item.get("mapx", ""),
+                "mapy": item.get("mapy", ""),
+                "area": district,
+            }
+            for item in raw_list
+        ]
+
+        # 식당·주점·병원 등 비관광지 제거
+        spots = [s for s in spots if not _is_non_tourist(s.get("title", ""))]
+
+        if district:
+            filtered = [s for s in spots if _district_match(district, s.get("address", ""))]
+            if filtered:
+                spots = filtered
+
+        for s in spots:
+            title = s.get("title", "")
+            if title and title not in seen_titles:
+                seen_titles.add(title)
+                tourist_spots.append(s)
 
     return {
         "current_step": "searching",

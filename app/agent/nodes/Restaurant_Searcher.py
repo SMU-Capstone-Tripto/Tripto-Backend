@@ -31,9 +31,9 @@ def Restaurant_Searcher(state: TravelState) -> dict:
     """관광지별 근처 식당·카페 검색 (spot_enhancer 완료 후 실행)"""
 
     city          = state.get("city", "")
-    district      = state.get("district", "")
+    districts     = state.get("districts") or []
     tourist_spots = state.get("tourist_spots") or []
-    location      = f"{city} {district}".strip() if district else city
+    location      = f"{city} {' '.join(districts)}".strip() if districts else city
 
     if not city:
         return {"current_step": "searching", "restaurants": [], "cafes": []}
