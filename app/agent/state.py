@@ -32,7 +32,8 @@ class TravelState(InputState):
     restaurants: Optional[List[dict]]     # 검색된 식당 목록
     cafes: Optional[List[dict]]           # 검색된 카페 목록
     origin_city: Optional[str]            # 사용자 출발지 (예: 서울, 부산)
-    transport_routes: Optional[List[dict]] # 출발지→목적지 교통 경로
+    transport_routes: Optional[List[dict]] # 가는편(출발지→목적지) 교통 경로
+    transport_return_routes: Optional[List[dict]] # 오는편(목적지→출발지) 교통 경로
     num_people: Optional[int]             # 여행 인원 수
     last_asked_field: Optional[str]      # 마지막으로 봇이 물어본 필드명
     selected_acc: Optional[dict]         # Optimizer가 선택한 숙소

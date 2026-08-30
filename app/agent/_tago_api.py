@@ -22,6 +22,16 @@ _CITY_CODE = {
     "전북": 35, "전남": 36, "경북": 37, "경남": 38,
 }
 
+# 도시명 → 실제 열차역명 별칭.
+# 한 도시에 역이 여러 개라 이름만으로는 KTX 정차역을 고를 수 없는 경우에만 등록한다.
+# (예: "대구"로 조회하면 KTX 미정차역인 대구역이 잡혀 요금이 틀어진다 → 동대구로 강제)
+_TRAIN_STATION_ALIAS = {
+    "대구": "동대구",
+    "광주": "광주송정",
+    "천안": "천안아산",
+    "울산": "울산",
+}
+
 # 시·군 도시명 → 광역시·도 키 매핑 (TAGO cityCode 조회용)
 _CITY_TO_PROVINCE_KEY = {
     "경주": "경북", "포항": "경북", "안동": "경북", "구미": "경북",
@@ -95,18 +105,39 @@ def _get_train_node_id(city: str) -> str | None:
         resp = requests.get(TRAIN_STATION_URL, params=params, timeout=10)
         resp.raise_for_status()
         items = _to_items(resp.json())
-        # 도시명과 일치하는 역 우선, 없으면 첫 번째 반환
-        node_id = None
-        for item in items:
-            if item.get("nodename") == city_clean:
-                node_id = item.get("nodeid")
-                break
-        if node_id is None and items:
-            node_id = items[0].get("nodeid")
-        _node_id_cache[city_clean] = node_id
-        return node_id
     except Exception:
         return None
+
+    node_id = _match_station(city_clean, items)
+    _node_id_cache[city_clean] = node_id
+    return node_id
+
+
+def _match_station(city_clean: str, items: list) -> str | None:
+    """도시명 → 역 nodeid. 별칭 > 정확일치 > 접두일치 > 부분일치 순.
+    엉뚱한 역(도내 첫 번째 역)을 잡느니 None을 반환해 버스 조회로 폴백하게 한다."""
+    names = {it.get("nodename"): it.get("nodeid")
+             for it in items if it.get("nodename") and it.get("nodeid")}
+    if not names:
+        return None
+
+    alias = _TRAIN_STATION_ALIAS.get(city_clean)
+    if alias and alias in names:
+        return names[alias]
+
+    if city_clean in names:
+        return names[city_clean]
+
+    # "여수" → "여수EXPO" 처럼 도시명으로 시작하는 역
+    for nm, nid in names.items():
+        if nm.startswith(city_clean):
+            return nid
+
+    for nm, nid in names.items():
+        if city_clean in nm or nm in city_clean:
+            return nid
+
+    return None
 
 
 def _get_timetable(dep_id: str, arr_id: str, dep_date: str, url: str) -> list:
@@ -128,13 +159,18 @@ def _get_timetable(dep_id: str, arr_id: str, dep_date: str, url: str) -> list:
         return []
 
 
-def _parse_date(traveldates: str) -> str:
-    """'2026-05-20 ~ 2026-05-23' → '20260520'"""
+def parse_dates(traveldates: str) -> tuple[str, str]:
+    """'2026-05-20 ~ 2026-05-23' → ('20260520', '20260523').
+    단일 날짜만 있으면 (d, d), 파싱 실패 시 ('', '')."""
     try:
-        start = traveldates.split("~")[0].strip()
-        return start.replace("-", "")
+        parts = [p.strip().replace("-", "") for p in str(traveldates).split("~")]
+        start = parts[0]
+        end   = parts[1] if len(parts) > 1 and parts[1] else start
+        if len(start) != 8:
+            return "", ""
+        return start, (end if len(end) == 8 else start)
     except Exception:
-        return ""
+        return "", ""
 
 
 def search_express_bus(origin: str, destination: str, dep_date: str) -> list:
@@ -183,7 +219,7 @@ def search_train(origin: str, destination: str, dep_date: str) -> list:
 
     params = {
         "serviceKey": TAGO_KEY,
-        "numOfRows": "5",
+        "numOfRows": "30",  # 일부 편성은 요금이 0으로 내려와 유효 요금 확보용으로 넉넉히
         "pageNo": "1",
         "_type": "json",
         "depPlaceId": dep_id,
@@ -210,10 +246,9 @@ def search_train(origin: str, destination: str, dep_date: str) -> list:
     ]
 
 
-def search_transport(origin: str, destination: str, traveldates: str) -> list:
-    """열차 + 고속버스 + 시외버스 통합 조회"""
-    dep_date = _parse_date(traveldates)
-    if not dep_date:
+def search_transport(origin: str, destination: str, dep_date: str) -> list:
+    """열차 + 고속버스 + 시외버스 통합 조회. dep_date: 'yyyymmdd' (한 방향)."""
+    if not dep_date or len(dep_date) != 8:
         return []
 
     routes = search_train(origin, destination, dep_date)

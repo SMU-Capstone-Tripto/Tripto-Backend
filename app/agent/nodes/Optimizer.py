@@ -9,6 +9,7 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
 from _naver_api import search_route, geocode
+from _odsay_api import search_transit
 from state import TravelState
 
 load_dotenv()
@@ -221,39 +222,86 @@ def _to_int_fare(val) -> int:
         return 0
 
 
+def _grade_rank(grade: str) -> int:
+    """열차 등급 선호 순위. KTX 계열을 최우선으로 하고, 없을 때만 하위 등급으로 내려간다.
+    (버스는 등급 개념이 없어 전부 같은 순위 → fare 순서로만 정렬됨)"""
+    g = str(grade).upper()
+    if "KTX" in g or "SRT" in g:
+        return 0
+    if "ITX" in g:
+        return 1
+    if "새마을" in str(grade):
+        return 2
+    if "무궁화" in str(grade):
+        return 3
+    return 4
+
+
+def _representative_route(routes: list) -> dict | None:
+    """API가 준 경로 중 '실제 요금이 있는' 대표 편도 경로 1개.
+    KTX 계열 우선 → 그 안에서 최저가 → 이른 출발 순. KTX가 없으면 다음 등급으로.
+    요금 있는 경로가 없으면 None. 교통비는 이 경로의 fare를 그대로 사용한다 (파이썬 추정 금지)."""
+    priced = [r for r in (routes or []) if _to_int_fare(r.get("fare", 0)) > 0]
+    if not priced:
+        return None
+    return min(priced, key=lambda r: (_grade_rank(r.get("grade", "")),
+                                      _to_int_fare(r.get("fare", 0)),
+                                      str(r.get("dep_time", "") or "~")))
+
+
 def _walk_str(km: float) -> str:
-    return f"도보 약 {max(1, int(km * 1000 / _WALK_M_PM))}분"
+    # 직선거리 → 실제 도보거리 보정(약 1.2배), 80 m/min
+    return f"도보 약 {max(1, int(km * 1.2 * 1000 / _WALK_M_PM))}분"
+
+
+def _taxi_estimate(km: float) -> str:
+    """네이버 택시요금 조회 실패 시에만 쓰는 최후 추정.
+    직선거리를 도로거리(×1.3)로 보정, 전국 평균 기본요금 4,000원 + 800원/km, 도심 22km/h."""
+    road_km   = km * 1.3
+    taxi_min  = int(road_km / 22 * 60) + 3
+    taxi_fare = int(round((4000 + max(0, road_km - 1.6) * 800) / 100) * 100)
+    return f"택시 약 {taxi_min}분·{taxi_fare:,}원(추정)"
 
 
 def _transit_info(km: float,
                   prev_coord: tuple[float, float] | None,
                   coord: tuple[float, float] | None) -> str:
-    taxi_min  = int(km / 30 * 60) + 5
-    taxi_fare = int(4800 + max(0, km - 1.6) * 1000)
-    taxi_str  = f"택시 약 {taxi_min}분·{taxi_fare:,}원"
-    bus_min   = int(km / 20 * 60) + 10
-    bus_str   = f"버스 약 {bus_min}분·1,500원(추정)"
-
+    """장소 간 이동 안내. 대중교통은 ODsay 실요금, 택시는 네이버 실요금 사용.
+    prev_coord/coord = (위도, 경도)."""
     # 직선거리 기준 도보 판정 (좌표 오차 감안해 1.2 km까지 도보)
     if km < _WALK_KM:
         return _walk_str(km)
 
-    if prev_coord and coord:
-        naver = search_route(prev_coord[1], prev_coord[0], coord[1], coord[0])
-        if naver and naver["time"] > 0:
-            fare_str = f"{naver['fare']:,}원" if naver["fare"] > 0 else "요금미정"
-            if naver["type"] == "transit":
-                route_detail = naver.get("summary", "")
-                if route_detail:
-                    return f"{route_detail} (도합 {naver['time']}분)·{fare_str} / {taxi_str}"
-                return f"버스/지하철 약 {naver['time']}분·{fare_str} / {taxi_str}"
-            # 자동차 경로 10분 이하 → 도보로 충분한 거리로 판단
-            if naver["type"] == "driving" and naver["time"] <= 10:
-                return _walk_str(km)
-            # 드라이빙 fallback: 대중교통 추정치도 함께 제공
-            return f"{bus_str} / 택시 약 {naver['time']}분·{fare_str}"
+    if not (prev_coord and coord):
+        return f"버스/택시 이용 (현지 확인) · 직선 {km:.1f}km"
 
-    return f"{bus_str} / {taxi_str}"
+    slat, slon = prev_coord
+    elat, elon = coord
+
+    # ── 택시: 네이버 자동차 경로의 실제 taxiFare ──
+    naver = search_route(slon, slat, elon, elat)
+    if naver and naver.get("time", 0) > 0 and naver.get("fare", 0) > 0:
+        # 자동차로도 아주 짧으면 도보가 현실적
+        if naver["time"] <= 8 and km < 1.6:
+            return _walk_str(km)
+        taxi_str = f"택시 약 {naver['time']}분·{naver['fare']:,}원"
+    else:
+        taxi_str = _taxi_estimate(km)
+
+    # ── 대중교통: ODsay 실제 버스/지하철 요금 ──
+    transit = search_transit(slon, slat, elon, elat)
+    if transit is None:
+        return taxi_str  # 대중교통 경로 없음 → 택시만
+    if transit.get("walk"):
+        return _walk_str(km)
+
+    label = transit.get("summary") or "버스/지하철"
+    seg   = f"{label} 약 {transit['time']}분"
+    if transit.get("fare", 0) > 0:
+        seg += f"·{transit['fare']:,}원"
+    if transit.get("transfers", 0) > 0:
+        seg += f" (환승 {transit['transfers']}회)"
+    return f"{seg} / {taxi_str}"
 
 
 def _transit_between(a: dict, b: dict) -> str:
@@ -280,12 +328,10 @@ def _build_departure_sequence(
       4) "{dest}역 → {숙소명} (대중교통 / 택시)"  ← 숙소 좌표 있을 때만
     routes 없으면 단순 이동 1줄만 반환.
     """
-    if not routes:
+    best = _representative_route(routes) or (routes[0] if routes else None)
+    if not best:
         return [f"{origin} → {dest} (대중교통 이용 예정)"]
 
-    def _key(r):
-        return (0 if _to_int_fare(r.get("fare", 0)) > 0 else 1, str(r.get("dep_time", "")))
-    best  = min(routes, key=_key)
     rtype = best.get("type", "교통편")
     grade = best.get("grade", "")
     fare  = _to_int_fare(best.get("fare", 0))
@@ -329,12 +375,10 @@ def _build_return_sequence(origin: str, dest: str, routes: list) -> list[str]:
       3) "HH:MM {origin}역 도착"
     routes 없으면 단순 이동 1줄만 반환.
     """
-    if not routes:
+    best = _representative_route(routes) or (routes[0] if routes else None)
+    if not best:
         return [f"{dest} → {origin} (대중교통 이용 예정)"]
 
-    def _key(r):
-        return (0 if _to_int_fare(r.get("fare", 0)) > 0 else 1, str(r.get("dep_time", "")))
-    best  = min(routes, key=_key)
     rtype = best.get("type", "교통편")
     grade = best.get("grade", "")
     fare  = _to_int_fare(best.get("fare", 0))
@@ -933,24 +977,32 @@ def Optimizer(state: TravelState) -> dict:
         if is_day_trip else
         f"   - accommodation: 숙박비 (1박 요금 × {num_days - 1}박)"
     )
-    # ── [추가] 교통비 및 식비 고정 계산 로직 ──────────────────────────────
+    # ── 교통비: TAGO API가 준 실제 요금만 사용 (파이썬 추정 없음) ──────────
+    #
+    #   왕복 = (가는편 대표 편성 fare) + (오는편 대표 편성 fare), 각 × 인원수.
+    #   오는편 조회가 실패하면 가는편 요금을 왕복 대칭으로 가정(× 2).
+    #   가는편 요금조차 못 받으면 0 + source="unknown" → UI에서 "요금 확인 필요" 표기.
+    out_route = _representative_route(state.get("transport_routes") or [])
+    ret_route = _representative_route(state.get("transport_return_routes") or [])
 
-    # 1. KTX 왕복 교통비 계산 (TAGO API 결과 중 KTX/철도 요금 기준 우선 추출)
-    transport_cost_total = 0
-    routes = state.get("transport_routes") or []
-    ktx_fare = 0
+    out_fare = _to_int_fare(out_route.get("fare", 0)) if out_route else 0
+    ret_fare = _to_int_fare(ret_route.get("fare", 0)) if ret_route else 0
 
-    for r in routes:
-        if "KTX" in str(r.get("type", "")) or "철도" in str(r.get("type", "")):
-            ktx_fare = _to_int_fare(r.get("fare", 0))
-            break
+    if out_fare and ret_fare:
+        transport_cost_total  = (out_fare + ret_fare) * num_people
+        transport_fare_source = "api"
+    elif out_fare:
+        transport_cost_total  = out_fare * 2 * num_people
+        transport_fare_source = "api_oneway"  # 오는편 조회 실패 → 편도 × 2 가정
+    else:
+        transport_cost_total  = 0
+        transport_fare_source = "unknown"     # API가 요금을 주지 못함
 
-    # 만약 API 결과에 없거나 0원인 경우 일반적인 KTX 편도 평균 요금(예: 50,000원)을 Fallback으로 지정
-    if ktx_fare == 0:
-        ktx_fare = 50000 
-
-    # KTX 왕복 교통비 (편도 요금 × 2 × 인원수)
-    transport_cost_total = ktx_fare * 2 * num_people
+    transport_fare_label = ""
+    if out_route:
+        transport_fare_label = (
+            f'{out_route.get("type", "")} {out_route.get("grade", "")}'.strip()
+        )
 
     # 2. 숙박비 계산
     accommodation_cost_total = 0
@@ -1068,13 +1120,14 @@ def Optimizer(state: TravelState) -> dict:
             "estimated_cost": {},
         }
 
-    transport_routes = state.get("transport_routes") or []
+    transport_routes        = state.get("transport_routes") or []
+    transport_return_routes  = state.get("transport_return_routes") or transport_routes
     departure_seq = (
         _build_departure_sequence(origin_city, city, transport_routes, selected_acc)
         if origin_city and city else []
     )
     return_seq = (
-        _build_return_sequence(origin_city, city, transport_routes)
+        _build_return_sequence(origin_city, city, transport_return_routes)
         if origin_city and city else []
     )
 
@@ -1117,7 +1170,9 @@ def Optimizer(state: TravelState) -> dict:
         itinerary = _fix_accommodation_name(itinerary, selected_acc.get("title", ""), acc_titles)
 
     estimated_cost = {
-        "transportation": transport_cost_total,
+        "transportation":        transport_cost_total,
+        "transportation_source": transport_fare_source,  # api | api_oneway | unknown
+        "transportation_label":  transport_fare_label,   # 예: "열차 KTX"
         "accommodation":  accommodation_cost_total,
         "meals":          meals_cost_total,
         "activities":     activities_cost_total,
