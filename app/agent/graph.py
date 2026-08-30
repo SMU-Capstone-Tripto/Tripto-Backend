@@ -145,7 +145,12 @@ if __name__ == "__main__":
         print(f"\n{sep}")
         print(f"  예상 총 경비  ({num_people}명 합산)")
         print(sep)
-        print(f"  교통비 (왕복·{num_people}명):  {cost.get('transportation', 0):>10,}원")
+        _tp_src  = cost.get("transportation_source", "")
+        _tp_note = {
+            "api_oneway": "  (편도요금 ×2 추정 — 오는편 조회 실패)",
+            "unknown":    "  (API 요금 조회 실패 — 현지 확인 필요)",
+        }.get(_tp_src, "")
+        print(f"  교통비 (왕복·{num_people}명):  {cost.get('transportation', 0):>10,}원{_tp_note}")
         print(f"  숙박비 (객실 기준):    {cost.get('accommodation',  0):>10,}원")
         print(f"  식비   ({num_people}명 합산):    {cost.get('meals',          0):>10,}원")
         print(f"  관광/입장 ({num_people}명):     {cost.get('activities',    0):>10,}원")

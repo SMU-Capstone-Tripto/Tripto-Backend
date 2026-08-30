@@ -59,7 +59,11 @@ def Tourist_Searcher(state: TravelState) -> dict:
                 "tel": item.get("tel", ""),
                 "image": item.get("firstimage", ""),
                 "content_id": item.get("contentid", ""),
-                "category": item.get("cat3", ""),
+                # 구 분류체계(cat1/cat2/cat3)는 실측 결과 부산타워·용두산공원 등 유명 관광지도
+                # 값이 비어있는 경우가 많아(19개 중 7개), TourAPI 4.0의 신 분류체계로 대체.
+                # category_group: 대분류(예: HS=역사, VE=명소, EX=체험, NA=자연), category: 소분류
+                "category_group": item.get("lclsSystm1", ""),
+                "category":       item.get("lclsSystm3", ""),
                 "mapx": item.get("mapx", ""),
                 "mapy": item.get("mapy", ""),
                 "area": district,

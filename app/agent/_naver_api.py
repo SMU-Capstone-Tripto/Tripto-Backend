@@ -1,5 +1,4 @@
 import os
-import time
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
@@ -14,7 +13,6 @@ _KEY_S    = os.getenv("NAVER_SEARCH", "")
 
 GEOCODE_URL = "https://openapi.naver.com/v1/search/local"
 DRIVING_URL = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
-TRANSIT_URL = "https://maps.apigw.ntruss.com/map-direction-15/v1/transit"
 
 
 def _headers() -> dict:
@@ -83,65 +81,15 @@ def geocode(query: str, sort: str = "random") -> tuple[float, float] | None:
         return None
 
 
-def _build_transit_summary(legs: list) -> str:
-    """legs 목록에서 '273번 버스 탑승(15분) → 도보(5분)' 형태의 상세 요약 생성"""
-    parts = []
-    for leg in legs:
-        mode  = leg.get("mode", "")
-        route = leg.get("route", "")
-        sec   = int(leg.get("sectionTime", 0))
-        mins  = sec // 60
-
-        if mode == "WALK":
-            if mins >= 2:  # 2분 미만 도보는 생략
-                parts.append(f"도보({mins}분)")
-        elif mode == "BUS" and route:
-            t = f"({mins}분)" if mins else ""
-            parts.append(f"{route}번 버스 탑승{t}")
-        elif mode == "SUBWAY" and route:
-            t = f"({mins}분)" if mins else ""
-            parts.append(f"{route} 탑승{t}")
-        elif mode == "EXPRESSBUS" and route:
-            t = f"({mins}분)" if mins else ""
-            parts.append(f"{route} 고속버스{t}")
-    return " → ".join(parts)
-
-
 def search_route(
     start_lon: float, start_lat: float,
     end_lon:   float, end_lat:   float,
 ) -> dict | None:
     """
-    두 좌표 간 경로 탐색. 대중교통 우선, 실패 시 자동차 경로.
-    Returns: {"time": int(분), "distance": float(km), "fare": int(원), "type": str, "summary": str}
+    두 좌표 간 자동차 경로 탐색 (택시요금 산정용).
+    Returns: {"time": int(분), "distance": float(km), "fare": int(taxiFare 원), "type": "driving", "summary": ""}
+    ※ NCP Directions API에는 대중교통 길찾기가 없다 → 대중교통은 _odsay_api.search_transit 사용.
     """
-    # 대중교통 시도
-    try:
-        resp = requests.get(
-            TRANSIT_URL,
-            params={
-                "start":         f"{start_lon},{start_lat}",
-                "goal":          f"{end_lon},{end_lat}",
-                "departureTime": int(time.time() * 1000),
-            },
-            headers=_headers(),
-            timeout=8,
-        )
-        resp.raise_for_status()
-        paths = resp.json().get("paths", [])
-        if paths:
-            best = min(paths, key=lambda p: p.get("duration", 99999))
-            return {
-                "time":     max(1, best["duration"] // 60),
-                "distance": round(best.get("distance", 0) / 1000, 1),
-                "fare":     best.get("fare", {}).get("public", {}).get("total", 0),
-                "type":     "transit",
-                "summary":  _build_transit_summary(best.get("legs", [])),
-            }
-    except Exception:
-        pass
-
-    # 자동차 경로 fallback
     try:
         resp = requests.get(
             DRIVING_URL,
