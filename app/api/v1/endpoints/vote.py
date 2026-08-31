@@ -124,6 +124,51 @@ async def cast_vote(
     return {"message": "투표가 완료되었습니다."}
 
 
+@router.put("/{vote_id}/cast", summary="투표 변경")
+async def change_vote(
+    vote_id: int,
+    body: VoteCastRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    이미 참여한 투표에서 다른 일정 버전으로 선택을 변경합니다.
+
+    - 진행 중(active)인 **group** 투표에서만 가능합니다.
+    - solo 투표는 투표 즉시 확정되므로 변경할 수 없습니다.
+    - 아직 투표하지 않았다면 `POST /vote/{vote_id}/cast` 를 먼저 호출하세요.
+    """
+    await vote_service.change_vote(
+        db=db,
+        vote_id=vote_id,
+        voter_id=current_user.user_id,
+        snapshot_id=body.snapshot_id,
+    )
+    return {"message": "투표가 변경되었습니다."}
+
+
+@router.delete("/{vote_id}", summary="활성 투표 취소")
+async def cancel_vote(
+    vote_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    진행 중인 투표를 취소(삭제)합니다.
+
+    - 투표 **생성자만** 호출할 수 있습니다.
+    - 아직 확정되지 않은(active) 투표만 취소할 수 있습니다.
+    - group 투표는 채팅방 멤버 전원에게 취소 알림이 발송됩니다.
+    - 투표 기록도 함께 삭제됩니다.
+    """
+    await vote_service.delete_vote_session(
+        db=db,
+        vote_id=vote_id,
+        current_user_id=current_user.user_id,
+    )
+    return {"message": "투표가 취소되었습니다."}
+
+
 @router.post("/{vote_id}/finalize", response_model=FinalizeResponse, summary="투표 강제 확정 및 여행 등록")
 async def finalize_vote(
     vote_id: int,
