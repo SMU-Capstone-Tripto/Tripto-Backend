@@ -163,6 +163,73 @@ async def cast_vote(
     await db.commit()
 
 
+async def change_vote(
+    db: AsyncSession,
+    vote_id: int,
+    voter_id: int,
+    snapshot_id: int,
+) -> None:
+    """이미 참여한 투표에서 선택한 일정 버전을 변경한다.
+    solo는 투표 즉시 확정되므로 변경 불가, group·ACTIVE 상태에서만 허용."""
+    session = await get_vote_session(db, vote_id)
+
+    if session.status != VoteStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="이미 종료된 투표입니다.")
+    if session.vote_type == VoteType.SOLO:
+        raise HTTPException(status_code=400, detail="solo 투표는 투표 즉시 확정되어 변경할 수 없습니다.")
+    if snapshot_id not in session.snapshot_ids:
+        raise HTTPException(status_code=400, detail="해당 스냅샷은 이 투표에 포함되지 않습니다.")
+
+    existing = await db.execute(
+        select(VoteRecord).where(
+            VoteRecord.vote_session_id == vote_id,
+            VoteRecord.voter_id == voter_id,
+        )
+    )
+    record = existing.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=400, detail="아직 투표하지 않았습니다. 먼저 투표해 주세요.")
+
+    if record.snapshot_id != snapshot_id:
+        record.snapshot_id = snapshot_id
+        await db.commit()
+
+
+async def delete_vote_session(
+    db: AsyncSession,
+    vote_id: int,
+    current_user_id: int,
+) -> None:
+    """진행 중인 투표를 취소(삭제)한다. 생성자만, ACTIVE 상태만 가능.
+    VoteRecord는 cascade로 함께 삭제된다."""
+    session = await get_vote_session(db, vote_id)
+
+    if session.creator_id != current_user_id:
+        raise HTTPException(status_code=403, detail="투표 생성자만 취소할 수 있습니다.")
+    if session.status != VoteStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="이미 종료된 투표는 취소할 수 없습니다.")
+
+    # group이면 채팅방 멤버에게 취소 알림
+    if session.vote_type == VoteType.GROUP and session.room_id:
+        members_result = await db.execute(
+            select(ChatRoomMember).where(
+                ChatRoomMember.room_id == session.room_id,
+                ChatRoomMember.user_id != current_user_id,
+            )
+        )
+        for member in members_result.scalars().all():
+            await notification_service._create_notification(
+                db=db,
+                recipient_id=member.user_id,
+                actor_id=current_user_id,
+                notif_type="vote_cancelled",
+                content="진행 중이던 여행 일정 투표가 취소되었습니다.",
+            )
+
+    await db.delete(session)
+    await db.commit()
+
+
 def _pick_winner(records: List[VoteRecord]) -> int:
     counts: dict[int, int] = {}
     for r in records:

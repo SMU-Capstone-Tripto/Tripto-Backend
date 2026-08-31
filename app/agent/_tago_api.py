@@ -173,6 +173,18 @@ def parse_dates(traveldates: str) -> tuple[str, str]:
         return "", ""
 
 
+def _station_label(api_name: str | None, city_fallback: str, kind: str) -> str:
+    """API가 준 실제 역/터미널명을 우선 사용. 없으면 '도시명+종류'로 폴백.
+    'EXPO'는 '엑스포'로, 열차는 '역'을 붙여 실제 표기와 맞춘다 (예: 여수EXPO → 여수엑스포역)."""
+    name = (api_name or "").strip()
+    if not name:
+        return f"{city_fallback}역" if kind == "역" else f"{city_fallback} {kind}"
+    name = name.replace("EXPO", "엑스포")
+    if kind == "역" and not name.endswith("역"):
+        name += "역"
+    return name
+
+
 def search_express_bus(origin: str, destination: str, dep_date: str) -> list:
     """고속버스 시간표 조회"""
     dep_id = _get_terminal_id(origin, EXP_TERMINAL_URL)
@@ -184,6 +196,8 @@ def search_express_bus(origin: str, destination: str, dep_date: str) -> list:
         {
             "type": "고속버스",
             "grade": item.get("gradeNm", ""),
+            "dep_station": _station_label(item.get("depPlaceNm"), origin, "고속터미널"),
+            "arr_station": _station_label(item.get("arrPlaceNm"), destination, "고속터미널"),
             "dep_time": item.get("depPlandTime", ""),
             "arr_time": item.get("arrPlandTime", ""),
             "fare": item.get("charge", 0),
@@ -202,6 +216,8 @@ def search_suburbs_bus(origin: str, destination: str, dep_date: str) -> list:
     return [
         {
             "type": "시외버스",
+            "dep_station": _station_label(item.get("depPlaceNm"), origin, "시외버스터미널"),
+            "arr_station": _station_label(item.get("arrPlaceNm"), destination, "시외버스터미널"),
             "dep_time": item.get("depPlandTime", ""),
             "arr_time": item.get("arrPlandTime", ""),
             "fare": item.get("charge", 0),
@@ -238,6 +254,8 @@ def search_train(origin: str, destination: str, dep_date: str) -> list:
             "type": "열차",
             "grade": item.get("traingradename", ""),
             "train_no": item.get("trainno", ""),
+            "dep_station": _station_label(item.get("depplacename"), origin, "역"),
+            "arr_station": _station_label(item.get("arrplacename"), destination, "역"),
             "dep_time": item.get("depplandtime", ""),
             "arr_time": item.get("arrplandtime", ""),
             "fare": item.get("adultcharge", 0),

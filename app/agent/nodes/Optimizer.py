@@ -8,7 +8,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
-from _naver_api import search_route, geocode
+from _naver_api import search_route, geocode, poi_kind as _poi_kind, is_franchise as _is_franchise
 from _odsay_api import search_transit
 from state import TravelState
 
@@ -337,6 +337,8 @@ def _build_departure_sequence(
     fare  = _to_int_fare(best.get("fare", 0))
     dep   = str(best.get("dep_time", ""))
     arr   = str(best.get("arr_time", ""))
+    dep_st = best.get("dep_station") or f"{origin}"      # API 실제 역/터미널명
+    arr_st = best.get("arr_station") or f"{dest}"
 
     # 출발·도착 시각 파싱
     dep_fmt = f"{dep[8:10]}:{dep[10:12]}" if len(dep) >= 12 else ""
@@ -348,21 +350,21 @@ def _build_departure_sequence(
     lines: list[str] = []
 
     if dep_fmt:
-        lines.append(f"{dep_fmt} {origin}역 출발")
-    lines.append(f"{origin}역 → {dest}역 ({vehicle}·{fare_str})")
+        lines.append(f"{dep_fmt} {dep_st} 출발")
+    lines.append(f"{dep_st} → {arr_st} ({vehicle}·{fare_str})")
     if arr_fmt:
-        lines.append(f"{arr_fmt} {dest}역 도착")
+        lines.append(f"{arr_fmt} {arr_st} 도착")
 
     # 도착역 → 숙소 이동 계산
     if accommodation:
         acc_coord = _parse_coord(accommodation)
-        station_coord = geocode(f"{dest}역")
+        station_coord = geocode(arr_st) or geocode(f"{dest}역")
         if acc_coord and station_coord:
             km = _haversine_km(station_coord[0], station_coord[1],
                                acc_coord[0], acc_coord[1])
             transit_str = _transit_info(km, station_coord, acc_coord)
             acc_title = accommodation.get("title", "숙소")
-            lines.append(f"{dest}역 → {acc_title} ({transit_str})")
+            lines.append(f"{arr_st} → {acc_title} ({transit_str})")
 
     return lines
 
@@ -382,11 +384,24 @@ def _build_return_sequence(origin: str, dest: str, routes: list) -> list[str]:
     rtype = best.get("type", "교통편")
     grade = best.get("grade", "")
     fare  = _to_int_fare(best.get("fare", 0))
+    dep_st = best.get("dep_station") or f"{dest}"   # 귀환편이므로 출발=목적지
+    arr_st = best.get("arr_station") or f"{origin}"
+
+    dep   = str(best.get("dep_time", ""))
+    arr   = str(best.get("arr_time", ""))
+    dep_fmt = f"{dep[8:10]}:{dep[10:12]}" if len(dep) >= 12 else ""
+    arr_fmt = f"{arr[8:10]}:{arr[10:12]}" if len(arr) >= 12 else ""
 
     vehicle  = (f"{rtype} {grade}").strip() if grade else rtype
     fare_str = f"{fare:,}원/인" if fare > 0 else "요금미정"
 
-    return [f"{dest}역 → {origin}역 ({vehicle}·{fare_str})"]
+    lines: list[str] = []
+    if dep_fmt:
+        lines.append(f"{dep_fmt} {dep_st} 출발")
+    lines.append(f"{dep_st} → {arr_st} ({vehicle}·{fare_str})")
+    if arr_fmt:
+        lines.append(f"{arr_fmt} {arr_st} 도착")
+    return lines
 
 
 # ── 동선 최적화  ──────────────────────────────────────
@@ -460,11 +475,41 @@ def _centroid(spots: list) -> tuple[float, float] | None:
             sum(c[1] for c in valid) / len(valid))
 
 
-def _pick_restaurants(day_spots: list, restaurants: list, used: set) -> tuple:
-    """하루 관광지 중심과 가장 가까운 미사용 식당 3개 선택"""
+_BRANCH_SUFFIX = re.compile(r'\s*\S+(점|지점|본점|직영점|DT점?|드라이브스루)$')
+
+
+def _brand_of(title: str) -> str:
+    """'스타벅스 여수돌산DT점' → '스타벅스', '카멜리아 회센터' → '카멜리아 회센터'"""
+    return _BRANCH_SUFFIX.sub('', title).strip() or title
+
+
+def _chain_titles(pool: list) -> set[str]:
+    """후보 풀에서 '체인'으로 볼 title 집합.
+    ① is_franchise 시드 리스트(버거킹·KFC 등 지점 표기 없는 것 포함)
+    ② 같은 브랜드 접두어가 풀 안에 2곳 이상 + 지점 접미사 → 자동 감지 (시드 리스트 없이도)."""
+    titles = [p.get("title", "") for p in pool if p.get("title")]
+    brand_count: dict[str, int] = {}
+    for t in titles:
+        b = _brand_of(t)
+        brand_count[b] = brand_count.get(b, 0) + 1
+
+    chain: set[str] = set()
+    for t in titles:
+        if _is_franchise(t):
+            chain.add(t)
+        elif brand_count[_brand_of(t)] >= 2 and _BRANCH_SUFFIX.search(t):
+            chain.add(t)
+    return chain
+
+
+def _pick_restaurants(day_spots: list, restaurants: list, used: set,
+                      chains: set[str] | None = None) -> tuple:
+    """하루 관광지 중심과 가장 가까운 미사용 식당 3개 선택.
+    chains에 든 곳은 후순위 — 근처에 로컬이 충분하면 안 뽑히고, 없을 때만 채워진다."""
     if not restaurants:
         return None, None, None
 
+    chains = chains or set()
     center = _centroid(day_spots)
 
     def dist(idx: int) -> float:
@@ -473,8 +518,11 @@ def _pick_restaurants(day_spots: list, restaurants: list, used: set) -> tuple:
             return float("inf")
         return _haversine_km(center[0], center[1], c[0], c[1])
 
+    def sort_key(idx: int) -> tuple:
+        return (restaurants[idx].get("title", "") in chains, dist(idx))
+
     all_idx   = list(range(len(restaurants)))
-    available = sorted([i for i in all_idx if i not in used], key=dist)
+    available = sorted([i for i in all_idx if i not in used], key=sort_key)
 
     picked = available[:3]
     for i in picked:
@@ -488,11 +536,13 @@ def _pick_restaurants(day_spots: list, restaurants: list, used: set) -> tuple:
     return result[0], result[1], result[2]
 
 
-def _pick_cafe(day_spots: list, cafes: list, used: set) -> dict | None:
-    """하루 관광지 중심과 가장 가까운 미사용 카페 1개 선택"""
+def _pick_cafe(day_spots: list, cafes: list, used: set,
+               chains: set[str] | None = None) -> dict | None:
+    """하루 관광지 중심과 가장 가까운 미사용 카페 1개 선택 (체인은 후순위)"""
     if not cafes:
         return None
 
+    chains = chains or set()
     center = _centroid(day_spots)
 
     def dist(idx: int) -> float:
@@ -501,8 +551,11 @@ def _pick_cafe(day_spots: list, cafes: list, used: set) -> dict | None:
             return float("inf")
         return _haversine_km(center[0], center[1], c[0], c[1])
 
+    def sort_key(idx: int) -> tuple:
+        return (cafes[idx].get("title", "") in chains, dist(idx))
+
     all_idx   = list(range(len(cafes)))
-    available = sorted([i for i in all_idx if i not in used], key=dist)
+    available = sorted([i for i in all_idx if i not in used], key=sort_key)
 
     if not available:
         return None
@@ -674,6 +727,7 @@ def _build_skeletons(
     dest_city: str = "",
     accommodation: dict | None = None,
     area_coords: dict[str, tuple[float, float]] | None = None,
+    demote_chains: bool = True,
 ) -> tuple[str, list[list[str]]]:
     """
     모든 일자의 스켈레톤 생성.
@@ -691,6 +745,8 @@ def _build_skeletons(
 
     used_rest: set = set()
     used_cafe: set = set()
+    rest_chains = _chain_titles(restaurants) if demote_chains else set()
+    cafe_chains = _chain_titles(cafes)       if demote_chains else set()
     parts = []
     day_transits: list[list[str]] = [[] for _ in range(num_days)]
 
@@ -698,8 +754,8 @@ def _build_skeletons(
         is_first = d == 0
         is_last  = d == num_days - 1
 
-        breakfast, lunch, dinner = _pick_restaurants(day_spots, restaurants, used_rest)
-        cafe = _pick_cafe(day_spots, cafes, used_cafe)
+        breakfast, lunch, dinner = _pick_restaurants(day_spots, restaurants, used_rest, rest_chains)
+        cafe = _pick_cafe(day_spots, cafes, used_cafe, cafe_chains)
 
         # 오전/오후 관광지 분할
         n_spots        = len(day_spots)
@@ -795,6 +851,30 @@ def _build_skeletons(
     return "\n\n".join(parts), day_transits
 
 
+_LONGHAUL_WORDS = ("자동차", "자가용", "렌터카", "렌트카", "승용차", "자차",
+                   "KTX", "고속버스", "시외버스")
+
+
+def _is_intercity_line(line: str, origin: str, dest: str) -> bool:
+    """LLM이 만든 광역(출발지↔목적지) 이동 줄인지 판정. 형식(시각 접두사 유무)과 무관.
+    - 한 줄에 출발지·목적지 두 도시가 모두 등장하거나
+    - 한 도시 + 장거리 이동수단 키워드(KTX·고속버스·자동차 등)
+    → departure_seq / return_seq 가 대체하므로 제거 대상.
+    시간범위(관광·식사) 줄은 보존."""
+    if not line:
+        return False
+    s = line.strip()
+    if re.match(r'^\d{2}:\d{2}\s*~\s*\d{2}:\d{2}', s):
+        return False
+    has_o = origin in s
+    has_d = dest in s
+    if has_o and has_d:
+        return True
+    if (has_o or has_d) and any(w in s for w in _LONGHAUL_WORDS):
+        return True
+    return False
+
+
 def _is_intercity_event(line: str, origin: str, dest: str) -> bool:
     """LLM이 중복 생성한 단일 시각 출발지·목적지 이벤트 줄 감지.
     예: '05:13 서울 출발', '07:50 부산역 도착' → True
@@ -808,7 +888,11 @@ def _is_intercity_event(line: str, origin: str, dest: str) -> bool:
         return False
     desc = m.group(1).strip()
 
-    # 형식 1: "서울역 출발" / "부산역 도착"
+    # 형식 1: "서울역 출발" / "부산역 도착" / "여수엑스포역 도착" / "동서울종합터미널 출발"
+    #   1일차·마지막날의 '역/터미널 + 출발/도착' 단일 이벤트는 항상 광역 이동 →
+    #   departure_seq / return_seq 가 대체하므로 역명이 무엇이든 제거.
+    if re.match(r'^\S*(역|터미널)\s+(출발|도착)$', desc):
+        return True
     for city in (origin, dest):
         for suffix in ("", "역"):
             for kw in ("출발", "도착"):
@@ -922,6 +1006,22 @@ def Optimizer(state: TravelState) -> dict:
     restaurants        = state.get("restaurants") or []
     cafes              = state.get("cafes") or []
 
+    # 카테고리 오분류 방어: 식당 슬롯에 관광/카페/액티비티가, 카페 슬롯에 식당이 섞여
+    # 들어오는 경우가 있어(예: '패러글라이딩'이 아침식사) 네이버 category로 한 번 더 거른다.
+    # (프랜차이즈는 제거하지 않는다 — _pick_*에서 후순위로 밀어내므로 근처에 로컬이 없을 때 채워짐)
+    _WRONG_FOR_MEAL = {"cafe", "bar", "attraction", "activity", "lodging"}
+    _WRONG_FOR_CAFE = {"restaurant", "bar", "attraction", "activity", "lodging"}
+    restaurants = [r for r in restaurants
+                   if _poi_kind(r.get("category", "")) not in _WRONG_FOR_MEAL]
+    cafes       = [c for c in cafes
+                   if _poi_kind(c.get("category", "")) not in _WRONG_FOR_CAFE]
+
+    # 사용자가 익숙함·편의를 원하면 프랜차이즈 후순위화를 끈다
+    _CHAIN_OK_HINTS = ("프랜차이즈", "체인", "편하게", "편한", "무난", "익숙")
+    demote_chains = not any(
+        h in p for p in (preferences or []) for h in _CHAIN_OK_HINTS
+    )
+
     # itinerary_feedback에 언급된 장소명을 스켈레톤에서 미리 제거
     # (재최적화 시 Restaurant_Searcher가 동일 장소를 재검색해서 다시 배정되는 것 방지)
     if itinerary_feedback:
@@ -949,6 +1049,7 @@ def Optimizer(state: TravelState) -> dict:
         origin_city=origin_city, dest_city=city,
         accommodation=selected_acc,
         area_coords=area_coords,
+        demote_chains=demote_chains,
     )
 
     # 프롬프트에 주입할 세부 피드백 섹션 정의
@@ -1139,16 +1240,14 @@ def Optimizer(state: TravelState) -> dict:
         # ── _inject_transits 실행 전 LLM 출력 형식 정규화 ───────────────
         raw = _normalize_schedule(list(day_schedule))
 
-        # ② 1일차: LLM이 생성한 광역 이동 줄(→) 및 단일 이벤트(도착/출발) 제거
+        # ② 1일차: LLM이 생성한 광역 이동 줄 제거 (형식 무관 — departure_seq로 대체)
         if is_first and origin_city:
-            raw = [l for l in raw
-                   if not (l and not l[0:1].isdigit() and "→" in l and origin_city in l)]
+            raw = [l for l in raw if not _is_intercity_line(l, origin_city, city)]
             raw = [l for l in raw if not _is_intercity_event(l, origin_city, city)]
 
         # ③ 마지막날: LLM이 생성한 귀환 줄 제거
         if is_last and not is_first and origin_city:
-            raw = [l for l in raw
-                   if not (l and not l[0:1].isdigit() and "→" in l and city in l and origin_city in l)]
+            raw = [l for l in raw if not _is_intercity_line(l, city, origin_city)]
             raw = [l for l in raw if not _is_intercity_event(l, city, origin_city)]
 
         transits = day_transits[day_idx] if 0 <= day_idx < len(day_transits) else []

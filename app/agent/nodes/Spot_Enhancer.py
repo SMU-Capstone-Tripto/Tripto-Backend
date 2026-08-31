@@ -9,7 +9,7 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from _naver_api import geocode, search_local
+from _naver_api import geocode, search_local, is_franchise as _is_franchise
 from state import TravelState
 
 load_dotenv()
@@ -38,12 +38,7 @@ _PREF_KEYWORDS_MAP: dict[str, list[str]] = {
     "가족":     ["가족여행", "키즈"],
 }
 
-_FRANCHISE_KEYWORDS = {
-    "스타벅스", "투썸플레이스", "이디야", "메가커피", "메가엠지씨커피", "메가mgc커피",
-    "빽다방", "컴포즈커피", "커피빈", "폴바셋", "탐앤탐스", "할리스",
-    "맥도날드", "버거킹", "롯데리아", "kfc", "맘스터치", "서브웨이",
-    "던킨", "배스킨라빈스", "파리바게뜨", "뚜레쥬르", "올리브영",
-}
+# 프랜차이즈 판정은 _naver_api.is_franchise 로 통일 (관광지·식당·카페 공통)
 
 _EXCLUDE_KEYWORDS = {
     "식당", "맛집", "횟집", "국밥", "갈비", "냉면", "치킨", "빵집",
@@ -70,11 +65,6 @@ _ADMIN_SUFFIX = re.compile(r'[시구군읍면동리]$')
 def _is_non_tourist(title: str) -> bool:
     t = title.lower()
     return any(kw in t for kw in _EXCLUDE_KEYWORDS)
-
-
-def _is_franchise(title: str) -> bool:
-    t = title.lower()
-    return any(kw in t for kw in _FRANCHISE_KEYWORDS)
 
 
 def _category_ok(category: str) -> bool:
