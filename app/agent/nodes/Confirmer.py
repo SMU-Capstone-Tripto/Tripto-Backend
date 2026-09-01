@@ -1,16 +1,11 @@
-from datetime import datetime
 from langchain_core.messages import AIMessage
 from state import TravelState
+from _dates import parse_range
 
 
-def _parse_num_days(traveldates: str) -> int | None:
-    try:
-        start_str, end_str = traveldates.split("~")
-        start = datetime.strptime(start_str.strip(), "%Y-%m-%d")
-        end   = datetime.strptime(end_str.strip(), "%Y-%m-%d")
-        return (end - start).days + 1
-    except Exception:
-        return None
+def _parse_num_days(traveldates) -> int | None:
+    r = parse_range(traveldates)
+    return (r[1] - r[0]).days + 1 if r else None
 
 
 def Confirmer(state: TravelState) -> dict:

@@ -48,7 +48,10 @@ def route_info(state: TravelState):
         if state.get("itinerary") and state.get("itinerary_feedback"):
             print("\n[상태] 기존 일정 수정 요청 → Revision_Manager")
             return "revision_manager"
-        # 최초 일정 생성 → 전체 검색 + 최적화
+        # 최초 일정 생성 → 3개 검색 브랜치 병렬 시작.
+        # restaurant_searcher는 여기 없음 — tourist_searcher → spot_enhancer → restaurant_searcher
+        # 로 이어지는 정적 엣지로 실행되며, optimizer는 3개 브랜치(travel/restaurant/transport)가
+        # 모두 끝나야 실행된다(다중 in-edge join).
         print("\n[상태] 사용자 확인 완료 -> 최적화 프로세스 진행")
         return ["travel_searcher", "tourist_searcher", "transport_searcher"]
 

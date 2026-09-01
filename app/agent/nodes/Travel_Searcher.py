@@ -1,24 +1,31 @@
+import math
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
+from _naver_api import geocode
+from _dates import is_peak_season as _is_peak_season
 from _tour_api import find_area_codes, fetch_area_list, fetch_detail_info
 from state import TravelState
 
+# 구역 미지정(도시 전체) 검색 시 도심에서 이 거리를 넘는 숙소(먼 섬 펜션 등) 제외
+_CITYWIDE_MAX_KM = 40
 
-def _is_peak_season(traveldates: str) -> bool:
-    """여행 시작일이 성수기(여름 7/15~8/31, 겨울 12/20~1/10)인지 판단"""
+
+def _haversine_km(lat1, lon1, lat2, lon2) -> float:
+    r = 6371
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = (math.sin(dp / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dl / 2) ** 2)
+    return r * 2 * math.asin(math.sqrt(a))
+
+
+def _ll(item: dict):
     try:
-        start_str = traveldates.split("~")[0].strip()
-        start = datetime.strptime(start_str, "%Y-%m-%d")
-        month, day = start.month, start.day
-        if (month == 7 and day >= 15) or month == 8:
-            return True
-        if (month == 12 and day >= 20) or (month == 1 and day <= 10):
-            return True
-        return False
-    except Exception:
-        return False
+        lat, lon = float(item.get("mapy") or 0), float(item.get("mapx") or 0)
+    except (ValueError, TypeError):
+        return None
+    return (lat, lon) if abs(lat) >= 1 and abs(lon) >= 1 else None
 
 
 def _min_cost_for_group(rooms: list, num_people: int, price_fn) -> float:
@@ -117,6 +124,9 @@ def Travel_Searcher(state: TravelState) -> dict:
             "area":       district,
         }
 
+    # 도시 전체 검색일 때만 쓰는 도심 좌표 (먼 섬 숙소 필터용)
+    city_center = geocode(city) if not districts else None
+
     seen_titles: set[str] = set()
     accommodations: list[dict] = []
 
@@ -125,11 +135,20 @@ def Travel_Searcher(state: TravelState) -> dict:
         if not sido_code:
             continue
 
-        num_rows = 100 if district else 30
         try:
-            raw_list = fetch_area_list(sido_code, "32", sigungu_code, num_rows=num_rows, arrange="B")
+            raw_list = fetch_area_list(sido_code, "32", sigungu_code, num_rows=100, arrange="O")
         except Exception:
             continue
+
+        # 도시 전체 검색: 방 정보 조회(느림) 전에 먼 섬 숙소부터 걸러낸다.
+        if not district and city_center:
+            near = [
+                it for it in raw_list
+                if (ll := _ll(it)) is None
+                or _haversine_km(city_center[0], city_center[1], ll[0], ll[1]) <= _CITYWIDE_MAX_KM
+            ]
+            if len(near) >= 10:
+                raw_list = near
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(_fetch_one, item, district) for item in raw_list[:50]]

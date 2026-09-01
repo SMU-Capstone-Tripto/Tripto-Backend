@@ -100,6 +100,48 @@ async def notify_friend_accepted(db: AsyncSession, recipient_id: int, actor_id: 
     )
 
 
+# AI 여행 일정 생성 완료 시 본인에게 알림 (앱을 꺼둔 사이 끝나도 알 수 있도록 FCM 푸시 포함)
+async def notify_itinerary_ready(
+    db: AsyncSession,
+    user_id: int,
+    plan_title: str = "",
+    room_id: Optional[int] = None,
+):
+    body = f"'{plan_title}' 일정이 완성됐어요! 확인해 보세요." if plan_title else "AI가 여행 일정을 다 만들었어요!"
+
+    # DB 알림 + WebSocket 실시간 push (앱이 열려 있으면 바로 뜸). 시스템 알림이라 actor=본인.
+    try:
+        await _create_notification(
+            db=db,
+            recipient_id=user_id,
+            actor_id=user_id,
+            notif_type="itinerary_ready",
+            content=body,
+        )
+    except Exception as e:
+        print(f"notify_itinerary_ready: DB 알림 실패 - {e}")
+
+    # FCM 푸시 (앱이 꺼져 있어도 폰에 뜸)
+    try:
+        result = await db.execute(
+            select(User.fcm_token).where(
+                User.user_id == user_id,
+                User.fcm_token.isnot(None),
+                User.is_active == True,
+            )
+        )
+        token = result.scalar_one_or_none()
+        if token:
+            await send_push_notification(
+                token=token,
+                title="여행 일정이 완성됐어요",
+                body=body,
+                data={"type": "itinerary_ready", "room_id": str(room_id) if room_id is not None else ""},
+            )
+    except Exception as e:
+        print(f"notify_itinerary_ready: FCM 푸시 실패 - {e}")
+
+
 # 유저의 전체 알림 목록을 최신순으로 조회
 async def get_notifications(db: AsyncSession, user_id: int) -> list[NotificationResponse]:
     result = await db.execute(
