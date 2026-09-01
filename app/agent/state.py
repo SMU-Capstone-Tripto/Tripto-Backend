@@ -14,7 +14,7 @@ class TravelState(InputState):
     messages: Annotated[list[BaseMessage], add_messages]  # MessagesState 역할 대체
     city: Optional[str]      # 목적지 (예: 제주시, 부산시)
     districts : Optional[List[str]]  # 목적지 세부 지역 리스트 (예: ["애월읍"], ["남포동", "송도"])
-    traveldates: Optional[dict]    # 여행 일정 (예: {"start": "2024-05-01", "end": "2024-05-05"})
+    traveldates: Optional[str]     # 여행 일정 "YYYY-MM-DD ~ YYYY-MM-DD" (파싱은 _dates.parse_range)
     budget: Optional[int]           # 예산 범위
     preferences: List[str]          # 선호도 (예: ["자연", "맛집", "쇼핑"])
     must_visit: Optional[List[str]] # 사용자가 꼭 가고 싶다고 강조한 장소

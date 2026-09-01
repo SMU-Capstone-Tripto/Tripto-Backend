@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _naver_api import geocode as _naver_geocode
+from _dates import parse_range
 from state import TravelState
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -42,13 +43,12 @@ class DailyPlan(BaseModel):
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────
 
-def _date_labels(traveldates: str, num_days: int) -> list:
-    try:
-        start_str, end_str = traveldates.split("~")
-        start = datetime.strptime(start_str.strip(), "%Y-%m-%d")
-        return [(start + timedelta(days=i)).strftime("%Y-%m-%d (%a)") for i in range(num_days)]
-    except Exception:
+def _date_labels(traveldates, num_days: int) -> list:
+    r = parse_range(traveldates)
+    if not r:
         return [f"Day {i+1}" for i in range(num_days)]
+    start = datetime(r[0].year, r[0].month, r[0].day)
+    return [(start + timedelta(days=i)).strftime("%Y-%m-%d (%a)") for i in range(num_days)]
 
 
 def _area_filter(items: list, target: str, exclude: Optional[str] = None) -> list:

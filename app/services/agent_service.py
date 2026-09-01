@@ -20,8 +20,10 @@ if _AGENT_DIR not in sys.path:
 
 from graph import app as _graph  # noqa: E402
 from app.services import vote_service  # noqa: E402
+from app.services import notification_service  # noqa: E402
 from app.infra.redis_client import get_redis  # noqa: E402
 from app.models.chat_model import ChatRoom  # noqa: E402
+from app.core.database import AsyncSessionLocal  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,10 @@ _MSG_TYPE_MAP = {
 # room_id가 None이면 채팅방과 무관한 "개인 대화" 세션을 의미한다.
 _sessions: dict[tuple[int, Optional[int]], dict] = {}
 _executor = ThreadPoolExecutor(max_workers=20)
+
+# 일정 생성 태스크를 SSE 연결과 분리해 띄운다. 여기에 강한 참조를 유지해야 GC되지 않는다.
+# (클라이언트가 화면을 꺼도 태스크는 끝까지 완주해 결과를 저장한다)
+_background_tasks: set = set()
 
 
 def _redis_key(user_id: int, room_id: Optional[int]) -> str:
@@ -350,85 +356,39 @@ async def chat_stream(
 
     graph_state = {**session["graph_state"], "question": message}
 
-    loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+    loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
     queue: asyncio.Queue            = asyncio.Queue()
 
-    def _run_stream():
-        try:
-            final_state = dict(graph_state)
-            for chunk in _graph.stream(graph_state):
-                node_name    = list(chunk.keys())[0]
-                state_update = chunk[node_name] or {}
-                final_state.update(state_update)
+    async def _build_result_and_persist(final_state: dict) -> dict:
+        """그래프 결과를 세션·Redis·DB에 저장하고 프론트로 보낼 result 페이로드를 만든다.
+        SSE 연결이 끊겨도 이 함수는 실행된다 (호출자가 요청과 분리된 태스크)."""
+        session["graph_state"] = final_state
+        session["result"]      = final_state
 
-                asyncio.run_coroutine_threadsafe(
-                    queue.put({"type": "status", "message": _STATUS.get(node_name, "처리 중...")}),
-                    loop,
-                )
+        messages = final_state.get("messages", [])
+        bot_msg  = next(
+            (m.content for m in reversed(messages) if isinstance(m, AIMessage)),
+            None,
+        )
+        step = final_state.get("current_step", "")
+        response: dict = {"type": "result", "content": bot_msg or "", "step": step}
 
-            asyncio.run_coroutine_threadsafe(
-                queue.put({"type": "done", "state": final_state}),
-                loop,
-            )
-        except Exception as e:
-            logger.exception("user_id=%s room_id=%s 그래프 실행 실패", user_id, room_id)
-            asyncio.run_coroutine_threadsafe(
-                queue.put({"type": "error", "message": str(e)}),
-                loop,
-            )
-
-    loop.run_in_executor(_executor, _run_stream)
-
-    while True:
-        try:
-            item = await asyncio.wait_for(queue.get(), timeout=STREAM_ITEM_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.error("user_id=%s room_id=%s 그래프 응답 시간 초과", user_id, room_id)
-            msg = json.dumps({"type": "error", "message": "응답 생성이 지연되고 있습니다. 잠시 후 다시 시도해 주세요."}, ensure_ascii=False)
-            yield f"data: {msg}\n\n"
-            break
-
-        if item["type"] == "status":
-            yield f"data: {json.dumps({'type': 'status', 'message': item['message']}, ensure_ascii=False)}\n\n"
-
-        elif item["type"] == "error":
-            yield f"data: {json.dumps({'type': 'error', 'message': item['message']}, ensure_ascii=False)}\n\n"
-            break
-
-        elif item["type"] == "done":
-            final_state            = item["state"]
-            session["graph_state"] = final_state
-            session["result"]      = final_state
-
-            messages = final_state.get("messages", [])
-            bot_msg  = next(
-                (m.content for m in reversed(messages) if isinstance(m, AIMessage)),
-                None,
-            )
-
-            step     = final_state.get("current_step", "")
-            response: dict = {
-                "type":    "result",
-                "content": bot_msg or "",
-                "step":    step,
-            }
+        if step == "optimized":
+            response["plan_title"]     = final_state.get("plan_title", "")
+            response["itinerary"]      = final_state.get("itinerary", [])
+            response["estimated_cost"] = final_state.get("estimated_cost", {})
+            response["selected_acc"]   = final_state.get("selected_acc")
 
             snapshot_id: Optional[int] = None
             snapshot_error: Optional[str] = None
-
-            if step == "optimized":
-                response["plan_title"]     = final_state.get("plan_title", "")
-                response["itinerary"]      = final_state.get("itinerary", [])
-                response["estimated_cost"] = final_state.get("estimated_cost", {})
-                response["selected_acc"]   = final_state.get("selected_acc")
-
-                # 최신 버전을 DB에 snapshot으로 저장
-                history = final_state.get("itinerary_history") or []
-                if history:
-                    latest = history[0]
-                    try:
+            history = final_state.get("itinerary_history") or []
+            if history:
+                latest = history[0]
+                try:
+                    # 요청 스코프 db는 연결 종료 시 닫힐 수 있어 독립 세션을 연다
+                    async with AsyncSessionLocal() as bg_db:
                         snap = await vote_service.save_snapshot(
-                            db=db,
+                            db=bg_db,
                             user_id=user_id,
                             version_num=latest.get("version", 1),
                             plan_title=latest.get("plan_title"),
@@ -438,24 +398,79 @@ async def chat_stream(
                             traveldates=latest.get("traveldates"),
                             city=latest.get("city"),
                         )
+                        await bg_db.commit()
                         snapshot_id = snap.snapshot_id
-                        session.setdefault("snapshot_ids", [])
-                        session["snapshot_ids"] = ([snapshot_id] + session["snapshot_ids"])[:3]
-                        await db.commit()
-                    except Exception:
-                        # snapshot 저장 실패가 채팅을 멈추면 안 되므로 흐름은 계속 진행하되,
-                        # 원인 추적 로깅 + 프론트가 알 수 있도록 응답에 경고를 남김
-                        logger.exception("user_id=%s 일정 스냅샷 저장 실패", user_id)
-                        snapshot_error = "일정 저장에 실패해 투표를 시작할 수 없습니다. 다시 시도해 주세요."
+                    session.setdefault("snapshot_ids", [])
+                    session["snapshot_ids"] = ([snapshot_id] + session["snapshot_ids"])[:3]
+                except Exception:
+                    logger.exception("user_id=%s 일정 스냅샷 저장 실패", user_id)
+                    snapshot_error = "일정 저장에 실패해 투표를 시작할 수 없습니다. 다시 시도해 주세요."
 
-                response["snapshot_id"] = snapshot_id
-                if snapshot_error:
-                    response["snapshot_error"] = snapshot_error
+            response["snapshot_id"] = snapshot_id
+            if snapshot_error:
+                response["snapshot_error"] = snapshot_error
 
-            # ── 세션 Redis 동기화 ─────────────────────────────────────
-            await _save_session(user_id, room_id)
+            # 앱을 꺼둔 사이 완성돼도 알 수 있도록 완료 알림(+FCM 푸시). 실패해도 흐름은 유지.
+            try:
+                async with AsyncSessionLocal() as notify_db:
+                    await notification_service.notify_itinerary_ready(
+                        db=notify_db,
+                        user_id=user_id,
+                        plan_title=response.get("plan_title", ""),
+                        room_id=room_id,
+                    )
+                    await notify_db.commit()
+            except Exception:
+                logger.exception("user_id=%s 일정 완료 알림 실패", user_id)
 
-            yield f"data: {json.dumps(response, ensure_ascii=False)}\n\n"
+        await _save_session(user_id, room_id)
+        return response
+
+    async def _generate():
+        """그래프 실행 + 결과 영속화. 요청(SSE)과 분리돼 있어 클라이언트가 끊겨도 완주한다."""
+        def _run_graph() -> dict:
+            final_state = dict(graph_state)
+            for chunk in _graph.stream(graph_state):
+                node_name = list(chunk.keys())[0]
+                final_state.update(chunk[node_name] or {})
+                asyncio.run_coroutine_threadsafe(
+                    queue.put({"type": "status", "message": _STATUS.get(node_name, "처리 중...")}),
+                    loop,
+                )
+            return final_state
+
+        try:
+            final_state = await loop.run_in_executor(_executor, _run_graph)
+            payload = await _build_result_and_persist(final_state)
+            await queue.put({"type": "result", "payload": payload})
+        except Exception as e:
+            logger.exception("user_id=%s room_id=%s 일정 생성 실패", user_id, room_id)
+            await queue.put({"type": "error", "message": str(e)})
+        finally:
+            await queue.put({"type": "eos"})
+
+    task = asyncio.create_task(_generate())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    # SSE 릴레이: 여기가 취소돼도(화면 off·이탈) 위 _generate 태스크는 계속 돈다
+    while True:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=STREAM_ITEM_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error("user_id=%s room_id=%s 그래프 응답 시간 초과 (생성은 계속 진행)", user_id, room_id)
+            msg = json.dumps({"type": "error", "message": "응답 생성이 지연되고 있습니다. 완료되면 세션에 저장되니 잠시 후 다시 확인해 주세요."}, ensure_ascii=False)
+            yield f"data: {msg}\n\n"
+            break
+
+        if item["type"] == "status":
+            yield f"data: {json.dumps({'type': 'status', 'message': item['message']}, ensure_ascii=False)}\n\n"
+        elif item["type"] == "error":
+            yield f"data: {json.dumps({'type': 'error', 'message': item['message']}, ensure_ascii=False)}\n\n"
+            break
+        elif item["type"] == "result":
+            yield f"data: {json.dumps(item['payload'], ensure_ascii=False)}\n\n"
+        elif item["type"] == "eos":
             break
 
     yield "data: [DONE]\n\n"

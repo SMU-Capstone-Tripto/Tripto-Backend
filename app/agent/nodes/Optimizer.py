@@ -10,24 +10,11 @@ from dotenv import load_dotenv
 
 from _naver_api import search_route, geocode, poi_kind as _poi_kind, is_franchise as _is_franchise
 from _odsay_api import search_transit
+from _tour_api import fetch_use_fee as _fetch_use_fee
 from state import TravelState
+from _dates import parse_range, is_peak_season as _is_peak_season
 
 load_dotenv()
-
-
-def _is_peak_season(traveldates: str) -> bool:
-    """여행 시작일이 성수기(여름 7/15~8/31, 겨울 12/20~1/10)인지 판단"""
-    try:
-        start_str = traveldates.split("~")[0].strip()
-        start = datetime.strptime(start_str, "%Y-%m-%d")
-        month, day = start.month, start.day
-        if (month == 7 and day >= 15) or month == 8:
-            return True
-        if (month == 12 and day >= 20) or (month == 1 and day <= 10):
-            return True
-        return False
-    except Exception:
-        return False
 
 
 def _min_cost_for_group(rooms: list, num_people: int, price_fn) -> int:
@@ -304,14 +291,61 @@ def _transit_info(km: float,
     return f"{seg} / {taxi_str}"
 
 
+_transit_cache: dict = {}
+
+
+def _warm_transit_pairs(spots_per_day, restaurants, cafes, accommodation,
+                        num_days, rest_chains, cafe_chains) -> None:
+    """_build_skeletons 본 루프의 pick/동선 로직을 fresh set으로 재현해 필요한
+    (출발지, 도착지) 쌍을 모으고, _transit_between 을 병렬로 호출해 캐시를 채운다."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    is_day_trip = num_days == 1
+    ur, uc = set(), set()
+    pairs: list[tuple[dict, dict]] = []
+
+    for d, day_spots in enumerate(spots_per_day):
+        bf, ln, dn = _pick_restaurants(day_spots, restaurants, ur, rest_chains)
+        cf = _pick_cafe(day_spots, cafes, uc, cafe_chains)
+        mid = math.ceil(len(day_spots) / 2)
+
+        prev = accommodation if (not is_day_trip and accommodation) else None
+        chain = [bf] + list(day_spots[:mid]) + [ln] + list(day_spots[mid:]) + [cf, dn]
+        if not (d == num_days - 1) and not is_day_trip and accommodation:
+            chain.append(accommodation)
+        for place in chain:
+            if not place:
+                continue
+            if prev is not None:
+                pairs.append((prev, place))
+            prev = place
+
+    uniq = {}
+    for a, b in pairs:
+        ca, cb = _parse_coord(a), _parse_coord(b)
+        if ca and cb:
+            uniq[(round(ca[0], 5), round(ca[1], 5), round(cb[0], 5), round(cb[1], 5))] = (a, b)
+
+    todo = [ab for k, ab in uniq.items() if k not in _transit_cache]
+    if not todo:
+        return
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        list(ex.map(lambda ab: _transit_between(*ab), todo))
+
+
 def _transit_between(a: dict, b: dict) -> str:
-    """두 장소 dict 간 이동 정보 문자열 반환"""
+    """두 장소 dict 간 이동 정보 문자열 반환 (좌표 기준 캐싱)"""
     ca = _parse_coord(a)
     cb = _parse_coord(b)
     if not ca or not cb:
         return "도보 약 5~15분 (정확한 경로는 현지 확인)"
+    key = (round(ca[0], 5), round(ca[1], 5), round(cb[0], 5), round(cb[1], 5))
+    if key in _transit_cache:
+        return _transit_cache[key]
     km = _haversine_km(ca[0], ca[1], cb[0], cb[1])
-    return _transit_info(km, ca, cb)
+    result = _transit_info(km, ca, cb)
+    _transit_cache[key] = result
+    return result
 
 
 def _build_departure_sequence(
@@ -528,10 +562,15 @@ def _pick_restaurants(day_spots: list, restaurants: list, used: set,
     for i in picked:
         used.add(i)
 
-    # 부족한 슬롯은 None으로 채워 겹침 방지 (식당 수 부족 시 해당 끼니 생략)
+    # 미사용 식당이 3개 미만이면 이미 쓴 식당이라도 가까운 순으로 채운다
+    # (끼니를 '현지 식당 직접 검색'으로 비우는 것보다 재방문이 낫다)
+    if len(picked) < 3:
+        refill = sorted([i for i in all_idx if i not in picked], key=sort_key)
+        picked += refill[: 3 - len(picked)]
+
     result = [restaurants[i] for i in picked]
     while len(result) < 3:
-        result.append(None)
+        result.append(None)   # 식당 자체가 3개 미만일 때만 도달
 
     return result[0], result[1], result[2]
 
@@ -641,12 +680,14 @@ def _assign_day_groups(
         ordered = mv_spots + _sort_nearest_neighbor(other_spots, start_coord=acc_coord)
         return _slice_by_day(ordered, num_days)
 
-    # area 태그가 없거나 알 수 없는 지역인 스팟(LLM 추천·필수방문 등)은 가장 가까운 지역으로 귀속
+    # area 태그가 없거나 알 수 없는 지역인 스팟(LLM 추천·필수방문 등)은 가장 가까운 지역으로 귀속.
+    # 원본 dict를 건드리면 LangGraph state에 남아 재최적화 시 결과가 달라지므로 로컬 맵으로만 관리.
+    area_of: dict[int, str | None] = {}
     for s in tourist_spots:
-        if not s.get("area") or s["area"] not in area_coords:
-            nearest = _nearest_area(_parse_coord(s), area_coords)
-            if nearest:
-                s["area"] = nearest
+        a = s.get("area")
+        if not a or a not in area_coords:
+            a = _nearest_area(_parse_coord(s), area_coords) or a
+        area_of[id(s)] = a
 
     target = min(len(area_coords), num_days)
     groups = _cluster_areas(area_coords, target)
@@ -660,7 +701,7 @@ def _assign_day_groups(
     # 그룹별 관광지 정렬 (필수방문 우선 + 숙소 기준 nearest-neighbor)
     group_spots: list[list[dict]] = []
     for g in groups:
-        spots = [s for s in tourist_spots if s.get("area") in g]
+        spots = [s for s in tourist_spots if area_of.get(id(s)) in g]
         mv    = [s for s in spots if s.get("must_visit")]
         rest  = [s for s in spots if not s.get("must_visit")]
         group_spots.append(mv + _sort_nearest_neighbor(rest, start_coord=acc_coord))
@@ -749,6 +790,12 @@ def _build_skeletons(
     cafe_chains = _chain_titles(cafes)       if demote_chains else set()
     parts = []
     day_transits: list[list[str]] = [[] for _ in range(num_days)]
+
+    # 이동 정보를 병렬로 미리 계산 — 스팟 쌍마다 ODsay+네이버 호출이라 순차로는 매우 느림.
+    # 아래 실제 루프와 같은 pick 로직을 fresh set으로 재현해 필요한 (a,b) 쌍만 워밍한다.
+    # (약간 어긋나도 캐시 미스로 개별 계산될 뿐, 결과는 동일)
+    _warm_transit_pairs(spots_per_day, restaurants, cafes, accommodation,
+                        num_days, rest_chains, cafe_chains)
 
     for d, day_spots in enumerate(spots_per_day):
         is_first = d == 0
@@ -848,7 +895,8 @@ def _build_skeletons(
 
         parts.append("\n".join(lines))
 
-    return "\n\n".join(parts), day_transits
+    visited_spots = [s for day in spots_per_day for s in day]
+    return "\n\n".join(parts), day_transits, visited_spots
 
 
 _LONGHAUL_WORDS = ("자동차", "자가용", "렌터카", "렌트카", "승용차", "자차",
@@ -988,18 +1036,17 @@ def Optimizer(state: TravelState) -> dict:
     # 2번 단계에서 추출한 세부 수정 피드백 가져오기
     itinerary_feedback = state.get("itinerary_feedback")
 
-    try:
-        start_str, end_str = traveldates.split("~")
-        start_date  = datetime.strptime(start_str.strip(), "%Y-%m-%d")
-        end_date    = datetime.strptime(end_str.strip(), "%Y-%m-%d")
-        num_days    = (end_date - start_date).days + 1
+    _range = parse_range(traveldates)
+    if _range:
+        start_date  = datetime(_range[0].year, _range[0].month, _range[0].day)
+        num_days    = (_range[1] - _range[0]).days + 1
         date_labels = [
             (start_date + timedelta(days=i)).strftime("%Y-%m-%d (%a)")
             for i in range(num_days)
         ]
-    except Exception:
+    else:
         num_days    = 1
-        date_labels = [traveldates]
+        date_labels = [str(traveldates)]
 
     transport_summary  = _summarize_transport(state.get("transport_routes") or [])
     tourist_spots      = state.get("tourist_spots") or []
@@ -1044,7 +1091,7 @@ def Optimizer(state: TravelState) -> dict:
             area_coords[d] = coord
 
     # 스켈레톤 사전 계산 (이동 정보 포함)
-    skeletons, day_transits = _build_skeletons(
+    skeletons, day_transits, visited_spots = _build_skeletons(
         tourist_spots, restaurants, cafes, num_days, transport_summary,
         origin_city=origin_city, dest_city=city,
         accommodation=selected_acc,
@@ -1125,11 +1172,18 @@ def Optimizer(state: TravelState) -> dict:
     # 3. 식비 고정 계산 (1인 1끼 15,000원 × 3끼 × 여행일수 × 인원수)
     meals_cost_total = 15000 * 3 * num_days * num_people
 
-    # 4. 관광/활동비는 남은 예산으로 배정하되, 음수가 되지 않도록 방어
-    remaining_budget = budget - (transport_cost_total + accommodation_cost_total + meals_cost_total)
-    activities_cost_total = max(0, remaining_budget)
+    # 4. 관광/활동비: 실제 방문하는 관광지의 입장료(관광공사 usefee) 합산 × 인원수.
+    #    문화시설(type 14)만 usefee 실값이 있으므로 그 중 방문 확정분만 조회한다.
+    #    요금을 못 받은 곳(type 12 유료·네이버발 등)은 0으로 취급 (추정하지 않음).
+    activities_fee_per_person = 0
+    for s in visited_spots:
+        if s.get("content_id") and s.get("content_type") == "14":
+            fee = _fetch_use_fee(s["content_id"], "14")
+            if fee:
+                activities_fee_per_person += fee
+    activities_cost_total = activities_fee_per_person * num_people
 
-    # 5. 최종 합계 재계산 (설정 예산 총액 이하로 안전하게 통제)
+    # 5. 최종 합계 = 실제 추정 지출 (예산 초과/여유가 그대로 드러남)
     total_calculated = transport_cost_total + accommodation_cost_total + meals_cost_total + activities_cost_total
 
     # 모든 일자가 공유하는 작성 규칙 (경비 규칙은 제외 — cost_breakdown은 Python이 이미 확정 계산하므로
@@ -1221,8 +1275,10 @@ def Optimizer(state: TravelState) -> dict:
             "estimated_cost": {},
         }
 
-    transport_routes        = state.get("transport_routes") or []
-    transport_return_routes  = state.get("transport_return_routes") or transport_routes
+    transport_routes         = state.get("transport_routes") or []
+    # 오는편 조회 실패 시 [] 그대로 — 가는편(transport_routes)으로 폴백하면 역명이
+    # "서울역 → 여수엑스포역"처럼 반대로 찍힌다. 없으면 _build_return_sequence가 일반 문구를 낸다.
+    transport_return_routes  = state.get("transport_return_routes") or []
     departure_seq = (
         _build_departure_sequence(origin_city, city, transport_routes, selected_acc)
         if origin_city and city else []
@@ -1274,8 +1330,8 @@ def Optimizer(state: TravelState) -> dict:
         "transportation_label":  transport_fare_label,   # 예: "열차 KTX"
         "accommodation":  accommodation_cost_total,
         "meals":          meals_cost_total,
-        "activities":     activities_cost_total,
-        "total":          total_calculated,
+        "activities":     activities_cost_total,   # 방문지 입장료 합 (관광공사 usefee, 못 받은 곳은 0)
+        "total":          total_calculated,        # 실제 추정 지출 — budget과 별개
         "budget":         budget,
     }
 
