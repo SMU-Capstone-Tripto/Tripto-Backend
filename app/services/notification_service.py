@@ -9,6 +9,7 @@ from firebase_admin import messaging
 
 from app.models.notification_model import Notification, NotificationType
 from app.models.user_model import User
+from app.models.chat_model import ChatRoomMember
 from app.schemas.notification_schema import NotificationResponse
 from app.core.firebase import get_firebase_messaging
 
@@ -140,6 +141,95 @@ async def notify_itinerary_ready(
             )
     except Exception as e:
         print(f"notify_itinerary_ready: FCM 푸시 실패 - {e}")
+
+
+# 투표가 동점으로 마감됐을 때 방장(생성자)에게 "직접 골라주세요" 알림 + FCM.
+async def notify_vote_tie(db: AsyncSession, vote_session):
+    body = "여행 일정 투표가 동점으로 마감됐어요. 방장이 최종 일정을 선택해 주세요."
+    try:
+        await _create_notification(
+            db=db,
+            recipient_id=vote_session.creator_id,
+            actor_id=vote_session.creator_id,
+            notif_type="vote_tie",
+            content=body,
+        )
+        await db.commit()
+    except Exception as e:
+        print(f"notify_vote_tie: DB 알림 실패 - {e}")
+
+    try:
+        token = (await db.execute(
+            select(User.fcm_token).where(
+                User.user_id == vote_session.creator_id,
+                User.fcm_token.isnot(None),
+                User.is_active == True,
+            )
+        )).scalar_one_or_none()
+        if token:
+            await send_push_notification(
+                token=token,
+                title="여행 일정 투표 결과",
+                body=body,
+                data={"type": "vote_tie", "vote_id": str(vote_session.vote_id)},
+            )
+    except Exception as e:
+        print(f"notify_vote_tie: FCM 푸시 실패 - {e}")
+
+
+# 투표가 마감(확정)됐을 때 생성자 + (그룹이면) 채팅방 멤버 전원에게 알림 + FCM 푸시.
+# db는 이 함수 안에서 flush + commit 한다. 호출자는 그 전에 트랜잭션을 정리해 둘 것.
+async def notify_vote_finalized(db: AsyncSession, vote_session, travel=None):
+    if travel is not None:
+        body = f"여행 일정 투표가 마감돼 '{travel.title}' 일정이 여행 탭에 등록됐어요!"
+    else:
+        body = "여행 일정 투표가 마감됐어요. (투표한 사람이 없어 일정은 등록되지 않았어요)"
+
+    recipients: set[int] = {vote_session.creator_id}
+    try:
+        if getattr(vote_session, "vote_type", None) and vote_session.vote_type.value == "group" and vote_session.room_id:
+            rows = await db.execute(
+                select(ChatRoomMember.user_id).where(ChatRoomMember.room_id == vote_session.room_id)
+            )
+            recipients |= {uid for uid in rows.scalars().all()}
+    except Exception as e:
+        print(f"notify_vote_finalized: 멤버 조회 실패 - {e}")
+
+    for uid in recipients:
+        try:
+            await _create_notification(
+                db=db,
+                recipient_id=uid,
+                actor_id=vote_session.creator_id,
+                notif_type="vote_finalized",
+                content=body,
+            )
+        except Exception as e:
+            print(f"notify_vote_finalized: DB 알림 실패 (user {uid}) - {e}")
+    await db.commit()
+
+    try:
+        tokens_result = await db.execute(
+            select(User.fcm_token).where(
+                User.user_id.in_(recipients),
+                User.fcm_token.isnot(None),
+                User.is_active == True,
+            )
+        )
+        tokens = [t for t in tokens_result.scalars().all() if t]
+        if tokens:
+            await send_multicast_notification(
+                tokens=tokens,
+                title="여행 일정 투표 결과",
+                body=body,
+                data={
+                    "type": "vote_finalized",
+                    "vote_id": str(vote_session.vote_id),
+                    "travel_id": str(travel.travel_id) if travel is not None else "",
+                },
+            )
+    except Exception as e:
+        print(f"notify_vote_finalized: FCM 푸시 실패 - {e}")
 
 
 # 유저의 전체 알림 목록을 최신순으로 조회

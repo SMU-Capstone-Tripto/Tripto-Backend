@@ -41,6 +41,9 @@ class VoteSessionResponse(BaseModel):
     results: List[VoteResultItem]
     my_vote: Optional[int]          # 내가 투표한 snapshot_id, 없으면 None
     winner_snapshot_id: Optional[int]
+    winner_travel_id: Optional[int] = None   # 당선작으로 등록된 여행 id (등록됐으면)
+    needs_tiebreak: bool = False             # 동점으로 마감 → 방장이 최종 일정 선택 필요
+    tied_snapshot_ids: List[int] = []        # 동점 후보 (needs_tiebreak일 때만)
     expires_at: Optional[datetime]
     created_at: datetime
 
