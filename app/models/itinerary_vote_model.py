@@ -53,8 +53,8 @@ class VoteSession(Base, TimestampMixin):
 
     creator        = relationship("User", foreign_keys=[creator_id])
     winner_snapshot = relationship("ItinerarySnapshot", foreign_keys=[winner_snapshot_id])
-    winner_travel  = relationship("Travel", foreign_keys=[winner_travel_id])
     records        = relationship("VoteRecord", back_populates="session", cascade="all, delete-orphan")
+    # winner_travel_id 는 컬럼만 사용 (관계 매핑 안 함 — Travel 조회는 명시적 select로)
 
 
 class VoteRecord(Base, TimestampMixin):
