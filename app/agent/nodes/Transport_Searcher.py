@@ -14,7 +14,7 @@ def _intercity_fallback(origin: str, destination: str) -> list:
         if not o or not d:
             return []
 
-        transit = search_transit(o[1], o[0], d[1], d[0])
+        transit = search_transit(o[1], o[0], d[1], d[0], pick="cheap")
         if transit and not transit.get("walk") and transit.get("fare", 0) > 0:
             return [{
                 "type":     "대중교통",
