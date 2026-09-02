@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
@@ -169,21 +170,33 @@ async def cancel_vote(
     return {"message": "투표가 취소되었습니다."}
 
 
+class FinalizeRequest(BaseModel):
+    winner_snapshot_id: Optional[int] = Field(
+        None,
+        description="동점일 때 방장이 최종으로 고를 일정 스냅샷 id. 단독 1위면 생략 가능.",
+    )
+
+
 @router.post("/{vote_id}/finalize", response_model=FinalizeResponse, summary="투표 강제 확정 및 여행 등록")
 async def finalize_vote(
     vote_id: int,
+    body: Optional[FinalizeRequest] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
     """
-    투표를 마감하고 최다 득표 일정을 최종 여행으로 등록합니다.
-    투표 생성자만 호출할 수 있습니다.
-    전원 투표 완료로 자동 확정된 경우에도 이 API로 Travel을 생성하세요.
+    투표를 마감하고 당선 일정을 최종 여행으로 등록합니다. 투표 생성자만 호출할 수 있습니다.
+
+    - 그룹 투표는 24시간이 지나면 조회/투표/서버 루프가 **자동으로 마감**하고 여행을 등록합니다.
+      이 API는 그 전에 즉시 마감하거나, 아래 동점 상황을 해소할 때 씁니다.
+    - **동점**(최다 득표 일정이 2개 이상)이면 자동 등록되지 않고 409를 반환합니다.
+      이때 `winner_snapshot_id` 로 최종 일정을 지정해 다시 호출하세요.
     """
     travel = await vote_service.finalize_vote(
         db=db,
         vote_id=vote_id,
         current_user_id=current_user.user_id,
+        winner_snapshot_id=body.winner_snapshot_id if body else None,
     )
     return FinalizeResponse(
         travel_id=travel.travel_id,
@@ -218,6 +231,17 @@ async def _build_response(db: AsyncSession, vote_session, user_id: int) -> VoteS
         for sid in vote_session.snapshot_ids
     ]
 
+    # 마감됐는데 당선작이 없고 표는 있음 = 동점 → 방장이 finalize(winner_snapshot_id)로 골라야 함
+    top = max(counts.values()) if counts else 0
+    needs_tiebreak = (
+        vote_session.status.value == "finalized"
+        and vote_session.winner_snapshot_id is None
+        and top > 0
+    )
+    tied_snapshot_ids = (
+        [sid for sid, c in counts.items() if c == top] if needs_tiebreak else []
+    )
+
     snapshots_out = [
         SnapshotOut(
             snapshot_id=s.snapshot_id,
@@ -241,6 +265,9 @@ async def _build_response(db: AsyncSession, vote_session, user_id: int) -> VoteS
         results=results,
         my_vote=my_vote,
         winner_snapshot_id=vote_session.winner_snapshot_id,
+        winner_travel_id=vote_session.winner_travel_id,
+        needs_tiebreak=needs_tiebreak,
+        tied_snapshot_ids=tied_snapshot_ids,
         expires_at=vote_session.expires_at,
         created_at=vote_session.created_at,
     )

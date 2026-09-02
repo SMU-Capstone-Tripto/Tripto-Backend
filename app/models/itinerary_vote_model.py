@@ -47,10 +47,13 @@ class VoteSession(Base, TimestampMixin):
     snapshot_ids        = Column(JSON, nullable=False)   # [snap_id, ...]
     status              = Column(Enum(VoteStatus, values_callable=lambda x: [e.value for e in x]), nullable=False, default=VoteStatus.ACTIVE)
     winner_snapshot_id  = Column(Integer, ForeignKey("itinerary_snapshots.snapshot_id", ondelete="SET NULL"), nullable=True)
+    # 확정된 일정으로 생성한 Travel. 마감(수동/자동/조회시)이 중복으로 Travel을 만들지 않도록 하는 멱등 가드.
+    winner_travel_id    = Column(Integer, ForeignKey("travels.travel_id", ondelete="SET NULL"), nullable=True)
     expires_at          = Column(DateTime(timezone=True), nullable=True)  # group만 사용
 
     creator        = relationship("User", foreign_keys=[creator_id])
     winner_snapshot = relationship("ItinerarySnapshot", foreign_keys=[winner_snapshot_id])
+    winner_travel  = relationship("Travel", foreign_keys=[winner_travel_id])
     records        = relationship("VoteRecord", back_populates="session", cascade="all, delete-orphan")
 
 
