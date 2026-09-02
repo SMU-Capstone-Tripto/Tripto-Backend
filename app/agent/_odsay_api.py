@@ -35,8 +35,12 @@ def _summarize(subpaths: list) -> str:
     return " → ".join(parts)
 
 
-def search_transit(sx: float, sy: float, ex: float, ey: float) -> dict | None:
+def search_transit(sx: float, sy: float, ex: float, ey: float,
+                   pick: str = "fast") -> dict | None:
     """대중교통(버스+지하철) 길찾기. 좌표는 경도(x)/위도(y).
+
+    pick: "fast"(기본, 스팟 간 이동용 — 최단시간) | "cheap"(도시 간 폴백용 — 최저요금).
+          도시 간은 KTX+버스 환승 같은 비싼 경로가 최단으로 잡혀서 요금이 튐.
 
     Returns:
         {"walk": True}                        출·도착지가 너무 가까워 도보 권장
@@ -47,7 +51,7 @@ def search_transit(sx: float, sy: float, ex: float, ey: float) -> dict | None:
     if not _ODSAY_KEY:
         return None
 
-    key = (round(sx, 5), round(sy, 5), round(ex, 5), round(ey, 5))
+    key = (round(sx, 5), round(sy, 5), round(ex, 5), round(ey, 5), pick)
     if key in _transit_cache:
         return _transit_cache[key]
 
@@ -75,13 +79,22 @@ def search_transit(sx: float, sy: float, ex: float, ey: float) -> dict | None:
         _transit_cache[key] = None
         return None
 
-    best = min(paths, key=lambda p: p.get("info", {}).get("totalTime", 99999))
+    def _pay(p):
+        i = p.get("info", {})
+        return int(i.get("payment") or i.get("totalPayment") or 0) or 10 ** 9
+
+    if pick == "cheap":
+        best = min(paths, key=_pay)
+    else:
+        best = min(paths, key=lambda p: p.get("info", {}).get("totalTime", 99999))
     info = best.get("info", {})
     boarded = int(info.get("busTransitCount", 0)) + int(info.get("subwayTransitCount", 0))
+    # 도시내 길찾기는 info.payment, 도시간(시외/고속버스·기차)은 info.totalPayment 로 요금이 온다
+    fare = int(info.get("payment") or info.get("totalPayment") or 0)
     result = {
         "walk":      False,
         "time":      int(info.get("totalTime", 0)),
-        "fare":      int(info.get("payment", 0)),
+        "fare":      fare,
         "transfers": max(0, boarded - 1),
         "summary":   _summarize(best.get("subPath", [])),
     }

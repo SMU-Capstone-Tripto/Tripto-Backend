@@ -1,9 +1,21 @@
 import os
+import re
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
+
+# "여수시" / "강릉시" / "서울특별시" 등 행정 접미사 제거용
+_ADMIN_SUFFIX = re.compile(r'(특별자치시|특별자치도|광역시|특별시|자치시|자치도|시|군|구|도)$')
+
+
+def _city_core(name: str) -> str:
+    """'여수시' → '여수', '서울특별시' → '서울'.
+    접미사를 떼서 2글자 미만이 되면('대구'→'대') 원본을 유지한다."""
+    n = (name or '').strip()
+    stripped = _ADMIN_SUFFIX.sub('', n)
+    return stripped if len(stripped) >= 2 else n
 
 TAGO_KEY = os.getenv("TAGO_KEY")
 
@@ -53,13 +65,13 @@ def _to_items(data: dict) -> list:
 
 
 def _get_terminal_id(city: str, url: str) -> str | None:
-    """도시명으로 버스 터미널 ID 조회"""
+    """도시명으로 버스 터미널 ID 조회 ('여수시' 등 접미사 제거 후 조회)"""
     params = {
         "serviceKey": TAGO_KEY,
         "numOfRows": "10",
         "pageNo": "1",
         "_type": "json",
-        "terminalNm": city,
+        "terminalNm": _city_core(city),
     }
     try:
         resp = requests.get(url, params=params, timeout=10)
@@ -74,24 +86,26 @@ _node_id_cache: dict[str, str | None] = {}
 
 
 def _get_train_node_id(city: str) -> str | None:
-    """도시명으로 기차 역 nodeid 조회 (세션 내 캐싱으로 중복 API 호출 방지)"""
-    city_clean = city.replace("역", "").strip()
+    """도시명으로 기차 역 nodeid 조회 (세션 내 캐싱으로 중복 API 호출 방지).
+    '여수시' 같은 행정 접미사가 붙어도 매칭되도록 core로 정규화한다."""
+    # 끝의 '역'만 제거 ('여수역'→'여수'). 전체 치환은 '대구광역시'→'대구광시'처럼 망가뜨림.
+    core = _city_core(re.sub(r'역$', '', (city or '').strip()))
 
-    if city_clean in _node_id_cache:
-        return _node_id_cache[city_clean]
+    if core in _node_id_cache:
+        return _node_id_cache[core]
 
     city_code = None
     for key, code in _CITY_CODE.items():
-        if key in city_clean:
+        if key in core:
             city_code = code
             break
     # 광역시·도 직접 매핑 실패 시 시·군 → 도 매핑으로 재시도
     if city_code is None:
-        province_key = _CITY_TO_PROVINCE_KEY.get(city_clean)
+        province_key = _CITY_TO_PROVINCE_KEY.get(core)
         if province_key:
             city_code = _CITY_CODE.get(province_key)
     if city_code is None:
-        _node_id_cache[city_clean] = None
+        _node_id_cache[core] = None
         return None
 
     params = {
@@ -108,8 +122,8 @@ def _get_train_node_id(city: str) -> str | None:
     except Exception:
         return None
 
-    node_id = _match_station(city_clean, items)
-    _node_id_cache[city_clean] = node_id
+    node_id = _match_station(core, items)
+    _node_id_cache[core] = node_id
     return node_id
 
 
@@ -159,17 +173,26 @@ def _get_timetable(dep_id: str, arr_id: str, dep_date: str, url: str) -> list:
         return []
 
 
-def parse_dates(traveldates: str) -> tuple[str, str]:
-    """'2026-05-20 ~ 2026-05-23' → ('20260520', '20260523').
-    단일 날짜만 있으면 (d, d), 파싱 실패 시 ('', '')."""
+_DATE_RE = re.compile(r'(\d{4})\D+(\d{1,2})\D+(\d{1,2})')
+
+
+def parse_dates(traveldates) -> tuple[str, str]:
+    """'2026-05-20 ~ 2026-05-23' / '2026.05.20~2026.05.23' / dict 등 → ('20260520', '20260523').
+    구분자(-, ., /, 공백) 무관. 단일 날짜면 (d, d), 파싱 실패 시 ('', '')."""
+    if isinstance(traveldates, dict):
+        text = f"{traveldates.get('start', '')} ~ {traveldates.get('end', '')}"
+    else:
+        text = str(traveldates or "")
+
+    found = _DATE_RE.findall(text)
+    if not found:
+        return "", ""
     try:
-        parts = [p.strip().replace("-", "") for p in str(traveldates).split("~")]
-        start = parts[0]
-        end   = parts[1] if len(parts) > 1 and parts[1] else start
-        if len(start) != 8:
-            return "", ""
-        return start, (end if len(end) == 8 else start)
-    except Exception:
+        fmt = lambda t: f"{int(t[0]):04d}{int(t[1]):02d}{int(t[2]):02d}"
+        start = fmt(found[0])
+        end   = fmt(found[1]) if len(found) > 1 else start
+        return start, end
+    except (ValueError, IndexError):
         return "", ""
 
 
