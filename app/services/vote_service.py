@@ -163,16 +163,19 @@ async def _ensure_travel(db: AsyncSession, vote_id: int) -> Optional[Travel]:
         return None
 
     start_date, end_date = _parse_travel_dates(snap.traveldates)
+    itinerary_text = list(snap.itinerary) if snap.itinerary else None
     travel = Travel(
         owner_id=locked.creator_id,
         title=snap.plan_title or "여행 계획",
         destination=snap.city or "",
         start_date=start_date,
         end_date=end_date,
+        itinerary=itinerary_text,   # AI 일정 원문 보존 (여행 상세에서 그대로 표시)
     )
     db.add(travel)
     await db.flush()
 
+    # 일자별 껍데기 Schedule (사용자가 이후 편집). 실제 내용은 travel.itinerary 에 있음.
     for day_idx, _ in enumerate(snap.itinerary or []):
         db.add(Schedule(
             travel_id=travel.travel_id,

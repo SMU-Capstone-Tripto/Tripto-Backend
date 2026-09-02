@@ -44,5 +44,6 @@ class TravelResponse(TravelBase):
 
 class TravelDetailResponse(TravelResponse): # 여행 상세 조회
     schedules: List[ScheduleSummaryResponse] = []
+    itinerary: Optional[List[str]] = None   # AI 일정 원문 (일자별). 수동 생성 여행은 None
 
 TravelDetailResponse.model_rebuild()
