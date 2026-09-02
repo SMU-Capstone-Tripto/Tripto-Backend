@@ -121,9 +121,6 @@ async def create_vote_session(
 
 
 async def get_vote_session(db: AsyncSession, vote_id: int) -> VoteSession:
-    # 조회 시점에 만료된 그룹 투표면 먼저 자동 마감한다 (별도 finalize 호출 없이도 등록되도록)
-    await _close_if_expired(db, vote_id)
-
     result = await db.execute(
         select(VoteSession)
         .options(selectinload(VoteSession.records))
@@ -132,6 +129,19 @@ async def get_vote_session(db: AsyncSession, vote_id: int) -> VoteSession:
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="투표를 찾을 수 없습니다.")
+
+    # 만료된 그룹 투표면 여기서 자동 마감(당선작 등록 + 알림) 후 최신 상태로 다시 로드한다.
+    # (만료 안 됐으면 _close_if_expired 를 아예 안 불러 rollback로 인한 ORM 상태 오염을 피한다)
+    if (session.status == VoteStatus.ACTIVE
+            and session.expires_at is not None
+            and session.expires_at < datetime.now(timezone.utc)):
+        await _close_if_expired(db, vote_id)
+        session = (await db.execute(
+            select(VoteSession)
+            .options(selectinload(VoteSession.records))
+            .where(VoteSession.vote_id == vote_id)
+        )).scalar_one_or_none() or session
+
     return session
 
 
@@ -163,16 +173,19 @@ async def _ensure_travel(db: AsyncSession, vote_id: int) -> Optional[Travel]:
         return None
 
     start_date, end_date = _parse_travel_dates(snap.traveldates)
+    itinerary_text = list(snap.itinerary) if snap.itinerary else None
     travel = Travel(
         owner_id=locked.creator_id,
         title=snap.plan_title or "여행 계획",
         destination=snap.city or "",
         start_date=start_date,
         end_date=end_date,
+        itinerary=itinerary_text,   # AI 일정 원문 보존 (여행 상세에서 그대로 표시)
     )
     db.add(travel)
     await db.flush()
 
+    # 일자별 껍데기 Schedule (사용자가 이후 편집). 실제 내용은 travel.itinerary 에 있음.
     for day_idx, _ in enumerate(snap.itinerary or []):
         db.add(Schedule(
             travel_id=travel.travel_id,
@@ -202,7 +215,8 @@ async def _close_if_expired(db: AsyncSession, vote_id: int) -> None:
             or locked.status != VoteStatus.ACTIVE
             or not locked.expires_at
             or locked.expires_at > datetime.now(timezone.utc)):
-        await db.rollback()   # 잠금 해제
+        # 마감할 것 없음. commit으로 잠금만 해제 (rollback은 ORM 객체를 만료시켜 이후 lazy-load 오류 유발)
+        await db.commit()
         return
 
     winner, tie = _winner_or_tie(locked.records)
