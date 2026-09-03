@@ -176,6 +176,7 @@ async def _ensure_travel(db: AsyncSession, vote_id: int) -> Optional[Travel]:
     itinerary_text = list(snap.itinerary) if snap.itinerary else None
     travel = Travel(
         owner_id=locked.creator_id,
+        room_id=locked.room_id,     # 그룹 투표면 방 멤버 전원의 '내 여행'에 노출
         title=snap.plan_title or "여행 계획",
         destination=snap.city or "",
         start_date=start_date,

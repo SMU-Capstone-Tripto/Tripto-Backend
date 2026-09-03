@@ -10,6 +10,8 @@ class Travel(Base, TimestampMixin):
 
     travel_id = Column(Integer, primary_key=True, autoincrement=True)
     owner_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    # 그룹 투표로 확정된 여행이면 그 채팅방 id. 방 멤버 전원의 '내 여행'에 노출된다. (개인 여행은 NULL)
+    room_id = Column(Integer, ForeignKey("chat_rooms.room_id", ondelete="SET NULL"), nullable=True, index=True)
     title = Column(String(100), nullable=False, comment="여행 제목")
     destination = Column(String(100), nullable=False, comment="목적지 (예: 제주도, 파리)")
     start_date = Column(Date, nullable=False, comment="여행 시작일")

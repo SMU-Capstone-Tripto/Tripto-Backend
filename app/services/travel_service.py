@@ -1,13 +1,14 @@
 from typing import List, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.travel_model import Travel
 from app.models.schedule_model import Schedule
 from app.models.memo_model import Memo
+from app.models.chat_model import ChatRoomMember
 from app.schemas.travel_schema import TravelCreate, TravelUpdate
 
 
@@ -31,8 +32,19 @@ async def get_travel(db: AsyncSession, travel_id: int) -> Optional[Travel]:
 
 
 async def get_travels_by_owner(db: AsyncSession, owner_id: int) -> List[Travel]:
-    result = await db.execute(select(Travel).where(Travel.owner_id == owner_id))
-    return list(result.scalars().all())
+    """내가 만든 여행 + 내가 속한 채팅방의 그룹 투표로 확정된 여행."""
+    my_room_ids = (await db.execute(
+        select(ChatRoomMember.room_id).where(ChatRoomMember.user_id == owner_id)
+    )).scalars().all()
+
+    conds = [Travel.owner_id == owner_id]
+    if my_room_ids:
+        conds.append(Travel.room_id.in_(my_room_ids))
+
+    result = await db.execute(
+        select(Travel).where(or_(*conds)).order_by(Travel.start_date.desc())
+    )
+    return list(result.scalars().unique().all())
 
 
 async def update_travel(db: AsyncSession, travel_id: int, data: TravelUpdate, owner_id: int):

@@ -38,6 +38,7 @@ class TravelResponse(TravelBase):
     model_config = ConfigDict(from_attributes=True)
     travel_id: int
     owner_id: int
+    room_id: Optional[int] = None   # 그룹 투표로 확정된 여행이면 그 채팅방 id
     created_at: datetime
     updated_at: datetime
 
