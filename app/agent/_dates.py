@@ -15,6 +15,39 @@ from datetime import date
 _DATE_RE = re.compile(r'(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})')
 
 
+def _add_years(d: date, n: int) -> date:
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:  # 2/29 → 평년
+        return d.replace(year=d.year + n, day=28)
+
+
+def shift_to_future(traveldates, today: date | None = None) -> str | None:
+    """시작일이 오늘보다 과거면 연도를 통째로 밀어 미래로 만든다 (여행 일수는 유지).
+
+    "2월에 가고 싶어" 처럼 연도 없이 말하면 현재 연도(예: 2026)로 뽑혀 과거가 되는데,
+    현재가 2026-09면 2027-02로 해석되도록 보정한다. 파싱 불가 시 원본을 그대로 반환.
+    """
+    r = parse_range(traveldates)
+    if not r:
+        return traveldates if isinstance(traveldates, str) else None
+
+    start, end = r
+    today = today or date.today()
+    if start >= today:
+        return traveldates if isinstance(traveldates, str) else f"{start.isoformat()} ~ {end.isoformat()}"
+
+    span = end - start
+    new_start = _add_years(start, today.year - start.year)
+    if new_start < today:
+        new_start = _add_years(start, today.year - start.year + 1)
+    new_end = new_start + span
+
+    if start == end:
+        return new_start.isoformat()
+    return f"{new_start.isoformat()} ~ {new_end.isoformat()}"
+
+
 def parse_range(traveldates) -> tuple[date, date] | None:
     """traveldates → (start_date, end_date). 파싱 불가 시 None. 단일 날짜면 (d, d)."""
     if not traveldates:
