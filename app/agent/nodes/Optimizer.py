@@ -17,37 +17,6 @@ from _dates import parse_range, is_peak_season as _is_peak_season
 load_dotenv()
 
 
-def _min_cost_for_group(rooms: list, num_people: int, price_fn) -> int:
-    """num_people을 수용하는 최저 비용 방 조합 계산 (DP)
-    dp[i] = i명을 수용하는 최저 비용
-    각 인원 i마다 모든 방 종류를 시도:
-        나머지 = max(0, i - 방수용인원)
-        dp[i] = min(dp[i], dp[나머지] + 이 방 가격)
-    """
-    options = [
-        (r.get("max_capacity", 0), price_fn(r))
-        for r in rooms
-        if r.get("max_capacity", 0) > 0 and price_fn(r) > 0
-    ]
-    if not options:
-        return 100000
-
-    INF = float("inf")
-    dp = [INF] * (num_people + 1)
-    dp[0] = 0
-
-    for i in range(1, num_people + 1):
-        for cap, price in options:
-            prev = max(0, i - cap)
-            if dp[prev] != INF and dp[prev] + price < dp[i]:
-                dp[i] = dp[prev] + price
-
-    if dp[num_people] != INF:
-        return int(dp[num_people])
-    max_cap = max(c for c, _ in options)
-    return 100000 * math.ceil(num_people / max_cap)
-
-
 def _get_room_combination(rooms: list, num_people: int, price_fn) -> list:
     """DP 역추적으로 최적 방 조합 반환 [{room, count, price_per_night}, ...]"""
     options = [
@@ -86,6 +55,37 @@ def _get_room_combination(rooms: list, num_people: int, price_fn) -> list:
     return list(counts.values())
 
 
+def _room_price_fn(is_peak: bool):
+    """성수기/비성수기에 맞는 방 1박 요금을 뽑는 함수 반환."""
+    def _price(room: dict) -> int:
+        if is_peak:
+            return room.get("peak_price") or room.get("min_price") or 0
+        return room.get("min_price") or 0
+    return _price
+
+
+def _acc_night_cost(acc: dict | None, num_people: int, is_peak: bool) -> int | None:
+    """숙소가 num_people을 수용하는 1박 최저 요금.
+    관광공사 API에 객실 요금이 하나도 등록돼 있지 않으면 None (추정 불가 신호).
+    """
+    if not acc:
+        return None
+    rooms = acc.get("rooms") or []
+    price_fn = _room_price_fn(is_peak)
+    if not any(price_fn(r) > 0 for r in rooms):
+        return None
+    suitable = [
+        r for r in rooms
+        if r.get("max_capacity", 0) >= num_people and price_fn(r) > 0
+    ]
+    if suitable:
+        return min(price_fn(r) for r in suitable)
+    combo = _get_room_combination(rooms, num_people, price_fn)
+    if combo:
+        return sum(c["price_per_night"] * c["count"] for c in combo)
+    return None
+
+
 def _select_accommodation(
     accommodations: list,
     tourist_spots: list,
@@ -94,16 +94,17 @@ def _select_accommodation(
     price_weight: float = 0.6,
     distance_weight: float = 0.4,
 ) -> dict | None:
-    """그룹 실비용(DP) + 관광지 중심 거리를 합산해 최적 숙소 선택"""
+    """그룹 실비용(DP) + 관광지 중심 거리를 합산해 최적 숙소 선택.
+
+    요금이 등록된 숙소를 우선 후보로 삼는다. 예전에는 요금 미등록 숙소에
+    10만원 폴백을 매겨 오히려 최저가로 뽑혀버렸다 — 그 폴백이 실제 그룹
+    숙박비보다 싸서 발생하던 문제. 이제는 요금이 있는 숙소가 하나라도
+    있으면 그 안에서만 고르고, 전부 미등록일 때만 거리 기준으로 폴백한다.
+    """
     if not accommodations:
         return None
     if len(accommodations) == 1:
         return accommodations[0]
-
-    def _room_price(room: dict) -> int:
-        if is_peak:
-            return room.get("peak_price") or room.get("min_price") or 0
-        return room.get("min_price") or 0
 
     # 관광지 중심 좌표 계산
     centroid = None
@@ -122,14 +123,6 @@ def _select_accommodation(
             sum(c[1] for c in coords) / len(coords),
         )
 
-    def _group_cost(acc: dict) -> int:
-        rooms = acc.get("rooms", [])
-        suitable = [r for r in rooms if r.get("max_capacity", 0) >= num_people]
-        if suitable:
-            prices = [_room_price(r) for r in suitable if _room_price(r) > 0]
-            return min(prices) if prices else 100000
-        return _min_cost_for_group(rooms, num_people, _room_price) if rooms else 100000
-
     def _distance_km(acc: dict) -> float:
         if not centroid:
             return 0.0
@@ -145,24 +138,38 @@ def _select_accommodation(
         except Exception:
             return float("inf")
 
-    scored = [(acc, _group_cost(acc), _distance_km(acc)) for acc in accommodations]
+    # 요금이 등록된 숙소만 후보로. 전부 미등록이면 어쩔 수 없이 전체를 후보로.
+    priced = [
+        (acc, night)
+        for acc in accommodations
+        if (night := _acc_night_cost(acc, num_people, is_peak)) is not None
+    ]
+    pool = priced if priced else [(acc, None) for acc in accommodations]
+    if len(pool) == 1:
+        return pool[0][0]
 
-    costs = [s[1] for s in scored]
-    dists = [s[2] for s in scored if s[2] != float("inf")]
+    dvals = [_distance_km(acc) for acc, _ in pool]
+    finite = [d for d in dvals if d != float("inf")]
+    dist_min = min(finite) if finite else 0.0
+    dist_range = ((max(finite) if finite else 1.0) - dist_min) or 1.0
 
-    cost_min, cost_max = min(costs), max(costs)
-    dist_min = min(dists) if dists else 0
-    dist_max = max(dists) if dists else 1
-    cost_range = (cost_max - cost_min) or 1
-    dist_range  = (dist_max - dist_min) or 1
+    have_cost = bool(priced)
+    if have_cost:
+        cvals = [c for _, c in pool]
+        cost_min = min(cvals)
+        cost_range = (max(cvals) - cost_min) or 1.0
 
-    def _score(cost: int, dist: float) -> float:
-        norm_cost = (cost - cost_min) / cost_range
+    def _score(idx: int) -> float:
+        _, cost = pool[idx]
+        dist = dvals[idx]
         norm_dist = (dist - dist_min) / dist_range if dist != float("inf") else 1.0
+        if not have_cost:
+            return norm_dist
+        norm_cost = (cost - cost_min) / cost_range
         return price_weight * norm_cost + distance_weight * norm_dist
 
-    scored.sort(key=lambda x: _score(x[1], x[2]))
-    return scored[0][0]
+    best = min(range(len(pool)), key=_score)
+    return pool[best][0]
 
 
 class DaySchedule(BaseModel):
@@ -1153,21 +1160,35 @@ def Optimizer(state: TravelState) -> dict:
         )
 
     # 2. 숙박비 계산
+    #   선택 숙소에 객실 요금이 등록돼 있으면 그 실요금(source="api").
+    #   미등록이면 같은 지역에서 요금이 있는 숙소들의 중앙값으로 추정(source="estimate").
+    #   지역 전체가 미등록이면 최후의 10만원 폴백(source="unknown").
     accommodation_cost_total = 0
+    accommodation_source     = "none"   # 당일치기
+    room_combination         = []
     if not is_day_trip:
-        def _room_price(room: dict) -> int:
-            if is_peak:
-                return room.get("peak_price") or room.get("min_price") or 0
-            return room.get("min_price") or 0
+        nights   = num_days - 1
+        price_fn = _room_price_fn(is_peak)
+        night_cost = _acc_night_cost(selected_acc, num_people, is_peak)
 
-        if selected_acc:
-            rooms = selected_acc.get("rooms", [])
-            min_room_price   = _min_cost_for_group(rooms, num_people, _room_price) if rooms else 100000
-            room_combination = _get_room_combination(rooms, num_people, _room_price)
+        if night_cost is not None:
+            room_combination     = _get_room_combination(
+                selected_acc.get("rooms") or [], num_people, price_fn
+            )
+            accommodation_source = "api"
         else:
-            min_room_price   = 100000
-            room_combination = []
-        accommodation_cost_total = min_room_price * (num_days - 1)
+            peers = sorted(
+                c for a in accommodations
+                if (c := _acc_night_cost(a, num_people, is_peak)) is not None
+            )
+            if peers:
+                night_cost           = peers[len(peers) // 2]
+                accommodation_source = "estimate"
+            else:
+                night_cost           = 100000
+                accommodation_source = "unknown"
+
+        accommodation_cost_total = night_cost * nights
 
     # 3. 식비 고정 계산 (1인 1끼 15,000원 × 3끼 × 여행일수 × 인원수)
     meals_cost_total = 15000 * 3 * num_days * num_people
@@ -1328,7 +1349,8 @@ def Optimizer(state: TravelState) -> dict:
         "transportation":        transport_cost_total,
         "transportation_source": transport_fare_source,  # api | api_oneway | unknown
         "transportation_label":  transport_fare_label,   # 예: "열차 KTX"
-        "accommodation":  accommodation_cost_total,
+        "accommodation":         accommodation_cost_total,
+        "accommodation_source":  accommodation_source,  # api | estimate | unknown | none
         "meals":          meals_cost_total,
         "activities":     activities_cost_total,   # 방문지 입장료 합 (관광공사 usefee, 못 받은 곳은 0)
         "total":          total_calculated,        # 실제 추정 지출 — budget과 별개

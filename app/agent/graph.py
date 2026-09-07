@@ -154,7 +154,11 @@ if __name__ == "__main__":
             "unknown":    "  (API 요금 조회 실패 — 현지 확인 필요)",
         }.get(_tp_src, "")
         print(f"  교통비 (왕복·{num_people}명):  {cost.get('transportation', 0):>10,}원{_tp_note}")
-        print(f"  숙박비 (객실 기준):    {cost.get('accommodation',  0):>10,}원")
+        _ac_note = {
+            "estimate": "  (요금 미등록 — 지역 중앙값 추정)",
+            "unknown":  "  (요금 미등록 — 현지 확인 필요)",
+        }.get(cost.get("accommodation_source", ""), "")
+        print(f"  숙박비 (객실 기준):    {cost.get('accommodation',  0):>10,}원{_ac_note}")
         print(f"  식비   ({num_people}명 합산):    {cost.get('meals',          0):>10,}원")
         print(f"  관광/입장 ({num_people}명):     {cost.get('activities',    0):>10,}원")
         print(f"  {'─' * 34}")
