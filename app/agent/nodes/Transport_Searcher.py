@@ -1,7 +1,33 @@
+import datetime
+
 from _tago_api import search_transport, parse_dates
 from _naver_api import geocode, search_route
 from _odsay_api import search_transit
 from state import TravelState
+
+# TAGO 시간표 API는 코레일 예매 오픈분(대략 2주치)만 응답한다. 그보다 먼 여행일이면
+# 시간표가 0건으로 내려와 자동차 폴백("요금미정")으로 떨어진다 → 같은 요일의 가까운
+# 대리 날짜로 조회해 요금·등급·시각대를 확보한다. KTX/버스 요금·시각표는 날짜가
+# 바뀌어도 거의 불변이라 교통비 정확도에는 영향이 없다.
+_TAGO_WINDOW_DAYS = 13
+
+
+def _query_date(real_date: str) -> str:
+    """search_transport에 넘길 조회일. 여행일이 조회 가능 창을 벗어나면
+    같은 요일의 가까운 미래 날짜(오늘+7~13일)로 대체한다. real_date: 'yyyymmdd'."""
+    try:
+        d = datetime.datetime.strptime(real_date, "%Y%m%d").date()
+    except (ValueError, TypeError):
+        return real_date
+
+    today = datetime.date.today()
+    if today <= d <= today + datetime.timedelta(days=_TAGO_WINDOW_DAYS):
+        return real_date
+
+    proxy = today + datetime.timedelta(days=7)
+    # 여행일과 요일을 맞춰 평일/주말 편성·요금대를 유지
+    proxy += datetime.timedelta(days=(d.weekday() - proxy.weekday()) % 7)
+    return proxy.strftime("%Y%m%d")
 
 
 def _intercity_fallback(origin: str, destination: str) -> list:
@@ -62,7 +88,7 @@ def Transport_Searcher(state: TravelState) -> dict:
 
     # 가는편: 출발일 origin → destination
     try:
-        outbound = search_transport(origin, destination, start_date)
+        outbound = search_transport(origin, destination, _query_date(start_date))
     except Exception:
         outbound = []
     if not outbound:
@@ -72,7 +98,7 @@ def Transport_Searcher(state: TravelState) -> dict:
     return_routes: list = []
     if end_date and end_date != start_date:
         try:
-            return_routes = search_transport(destination, origin, end_date)
+            return_routes = search_transport(destination, origin, _query_date(end_date))
         except Exception:
             return_routes = []
         if not return_routes:
