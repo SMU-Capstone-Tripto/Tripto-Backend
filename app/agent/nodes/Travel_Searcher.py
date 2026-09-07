@@ -150,8 +150,10 @@ def Travel_Searcher(state: TravelState) -> dict:
             if len(near) >= 10:
                 raw_list = near
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(_fetch_one, item, district) for item in raw_list[:50]]
+        # 객실 요금(detailInfo2)이 등록된 숙소 비율이 지역마다 낮아, 상위 50곳만 보면
+        # 요금 있는 후보가 한 손에 꼽히는 지역이 있다. 지연은 +2초 이내이므로 80곳까지 넓힌다.
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(_fetch_one, item, district) for item in raw_list[:80]]
             fetched = [f.result() for f in futures]
 
         if district:
