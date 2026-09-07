@@ -9,6 +9,7 @@ from langchain_groq import ChatGroq
 from datetime import datetime
 
 from state import TravelState
+from _dates import shift_to_future
 
 load_dotenv()
 
@@ -207,6 +208,7 @@ def Intent_Analyzer(state: TravelState) -> dict:
         
         사용자가 '7월 5일부터 2박3일'과 같이 기간을 이야기하면, 시작 날짜를 기준으로 종료 날짜를 계산해서 포맷에 맞게 추출해줘.
         [중요] 'N박M일'에서 종료일 = 시작일 + N일 (박수만큼만 더함). 예: 7월 5일부터 2박3일 → 2024-07-05 ~ 2024-07-07 (2일 더함, 3일 더하면 안 됨)
+        [중요] 연도를 말하지 않고 '2월'처럼만 말하면, 오늘({today}) 이후로 가장 가까운 그 달을 골라. 이미 지난 달이면 내년으로.
 
         추출할 필드:
         - city: 목적지 시 단위
@@ -282,6 +284,12 @@ def Intent_Analyzer(state: TravelState) -> dict:
         result["preferences"] = state.get("preferences") or []
         result["must_visit"] = state.get("must_visit") or []
         result["itinerary_feedback"] = state.get("itinerary_feedback") # 유지
+
+    # 연도 없이 '2월'처럼 말하면 현재 연도로 뽑혀 과거가 되는 경우가 있다.
+    # 이번 턴에 새로 잡힌/바뀐 날짜라면 무조건 오늘 이후로 민다 (기간은 유지).
+    td = result.get("traveldates")
+    if td and td != "NULL" and td != state.get("traveldates"):
+        result["traveldates"] = shift_to_future(td)
 
     result["messages"] = [HumanMessage(content=user_input)]
     result["current_step"] = "awaiting_confirmation" if is_correction else "analyzing"
