@@ -101,12 +101,15 @@ async def notify_friend_accepted(db: AsyncSession, recipient_id: int, actor_id: 
     )
 
 
-# AI 여행 일정 생성 완료 시 본인에게 알림 (앱을 꺼둔 사이 끝나도 알 수 있도록 FCM 푸시 포함)
+# AI 여행 일정 생성 완료 시 알림 (앱을 꺼둔 사이 끝나도 알 수 있도록 FCM 푸시 포함).
+# 요청자에게는 항상, notify_room_members=True면 같은 채팅방의 나머지 멤버에게도 "새 초안" 알림.
 async def notify_itinerary_ready(
     db: AsyncSession,
     user_id: int,
     plan_title: str = "",
     room_id: Optional[int] = None,
+    actor_nickname: str = "",
+    notify_room_members: bool = False,
 ):
     body = f"'{plan_title}' 일정이 완성됐어요! 확인해 보세요." if plan_title else "AI가 여행 일정을 다 만들었어요!"
 
@@ -141,6 +144,59 @@ async def notify_itinerary_ready(
             )
     except Exception as e:
         print(f"notify_itinerary_ready: FCM 푸시 실패 - {e}")
+
+    # ── 그룹 채팅방이면 나머지 멤버에게도 "새 초안 나왔어요" 알림 ──
+    # 수정할 때마다 전원에게 울리면 시끄러우므로, 호출부에서 첫 생성일 때만 True를 넘긴다.
+    if not (notify_room_members and room_id):
+        return
+
+    who  = f"{actor_nickname}님이 " if actor_nickname else ""
+    what = f"'{plan_title}' " if plan_title else ""
+    room_body = f"{who}{what}여행 일정 초안을 만들었어요. 확인하고 투표해 보세요."
+
+    try:
+        rows = await db.execute(
+            select(ChatRoomMember.user_id).where(ChatRoomMember.room_id == room_id)
+        )
+        # 요청자 본인(위에서 이미 알림)과 AI 봇(user_id=-1, 채팅방 멤버로 들어가 있음)은 제외
+        member_ids = {uid for uid in rows.scalars().all() if uid != user_id and uid > 0}
+    except Exception as e:
+        print(f"notify_itinerary_ready: 방 멤버 조회 실패 - {e}")
+        return
+    if not member_ids:
+        return
+
+    for uid in member_ids:
+        try:
+            await _create_notification(
+                db=db,
+                recipient_id=uid,
+                actor_id=user_id,
+                notif_type="itinerary_draft",
+                content=room_body,
+            )
+        except Exception as e:
+            print(f"notify_itinerary_ready: 멤버 DB 알림 실패 (user {uid}) - {e}")
+
+    try:
+        tokens = [
+            t for t in (await db.execute(
+                select(User.fcm_token).where(
+                    User.user_id.in_(member_ids),
+                    User.fcm_token.isnot(None),
+                    User.is_active == True,
+                )
+            )).scalars().all() if t
+        ]
+        if tokens:
+            await send_multicast_notification(
+                tokens=tokens,
+                title="새 여행 일정 초안",
+                body=room_body,
+                data={"type": "itinerary_draft", "room_id": str(room_id)},
+            )
+    except Exception as e:
+        print(f"notify_itinerary_ready: 멤버 FCM 푸시 실패 - {e}")
 
 
 # 투표가 동점으로 마감됐을 때 방장(생성자)에게 "직접 골라주세요" 알림 + FCM.
