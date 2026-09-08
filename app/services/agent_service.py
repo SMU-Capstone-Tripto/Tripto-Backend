@@ -411,13 +411,17 @@ async def chat_stream(
                 response["snapshot_error"] = snapshot_error
 
             # 앱을 꺼둔 사이 완성돼도 알 수 있도록 완료 알림(+FCM 푸시). 실패해도 흐름은 유지.
+            # 그룹 채팅방에서 만든 '첫' 초안(version 1)일 때만 나머지 멤버에게도 알린다 — 수정 땐 요청자만.
             try:
+                latest_ver = history[0].get("version", 1) if history else 1
                 async with AsyncSessionLocal() as notify_db:
                     await notification_service.notify_itinerary_ready(
                         db=notify_db,
                         user_id=user_id,
                         plan_title=response.get("plan_title", ""),
                         room_id=room_id,
+                        actor_nickname=user_nickname,
+                        notify_room_members=(room_id is not None and latest_ver == 1),
                     )
                     await notify_db.commit()
             except Exception:

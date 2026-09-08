@@ -1,10 +1,12 @@
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_async_db
+from app.core.database import get_async_db, AsyncSessionLocal
 from app.core.dependencies import get_current_user
+from app.core.security import verify_access_token
 from app.models.user_model import User
 from app.schemas.notification_schema import NotificationResponse
 from app.services import notification_service
@@ -44,8 +46,25 @@ async def mark_all_notifications_read(
 @router.websocket("/ws")
 async def notification_websocket(
     websocket: WebSocket,
-    user_id: int = Query(...),
+    token: str = Query(..., description="액세스 토큰 (쿼리스트링). 예전 user_id 파라미터 대체"),
 ):
+    # 액세스 토큰에서 user_id를 뽑는다 — 예전엔 user_id를 쿼리로 그대로 받아
+    # 누구나 남의 알림 채널을 구독할 수 있었다(위조 가능).
+    async with AsyncSessionLocal() as db:
+        try:
+            payload = verify_access_token(token)
+            user_id = int(payload.get("sub"))
+        except (HTTPException, ValueError, TypeError):
+            await websocket.close(code=1008)  # Policy Violation
+            return
+
+        user = (
+            await db.execute(select(User).where(User.user_id == user_id))
+        ).scalar_one_or_none()
+        if not user or not user.is_active:
+            await websocket.close(code=1008)
+            return
+
     await notification_service.manager.connect(user_id, websocket)
     try:
         while True:
