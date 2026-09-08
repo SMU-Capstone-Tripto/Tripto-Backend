@@ -81,24 +81,70 @@ async def _create_notification(
 
 # 친구 요청 수신자에게 알림 생성
 async def notify_friend_request(db: AsyncSession, recipient_id: int, actor_id: int, actor_nickname: str):
+    content = f"{actor_nickname}님이 친구 요청을 보냈습니다."
+
+    # DB 알림 + WebSocket 실시간 push
     await _create_notification(
         db=db,
         recipient_id=recipient_id,
         actor_id=actor_id,
         notif_type=NotificationType.FRIEND_REQUEST,
-        content=f"{actor_nickname}님이 친구 요청을 보냈습니다.",
+        content=content,
     )
+
+    # FCM 푸시 (앱이 꺼져 있어도 폰에 뜸)
+    try:
+        result = await db.execute(
+            select(User.fcm_token).where(
+                User.user_id == recipient_id,
+                User.fcm_token.isnot(None),
+                User.is_active == True,
+            )
+        )
+        token = result.scalar_one_or_none()
+        if token:
+            await send_push_notification(
+                token=token,
+                title="친구 요청",
+                body=content,
+                data={"type": "friend_request", "actor_id": str(actor_id)},
+            )
+    except Exception as e:
+        print(f"notify_friend_request: FCM 푸시 실패 - {e}")
 
 
 # 친구 수락 시 요청자에게 알림 생성
 async def notify_friend_accepted(db: AsyncSession, recipient_id: int, actor_id: int, actor_nickname: str):
+    content = f"{actor_nickname}님이 친구 요청을 수락했습니다."
+
+    # DB 알림 + WebSocket 실시간 push
     await _create_notification(
         db=db,
         recipient_id=recipient_id,
         actor_id=actor_id,
         notif_type=NotificationType.FRIEND_ACCEPTED,
-        content=f"{actor_nickname}님이 친구 요청을 수락했습니다.",
+        content=content,
     )
+
+    # FCM 푸시 (앱이 꺼져 있어도 폰에 뜸)
+    try:
+        result = await db.execute(
+            select(User.fcm_token).where(
+                User.user_id == recipient_id,
+                User.fcm_token.isnot(None),
+                User.is_active == True,
+            )
+        )
+        token = result.scalar_one_or_none()
+        if token:
+            await send_push_notification(
+                token=token,
+                title="친구 수락",
+                body=content,
+                data={"type": "friend_accepted", "actor_id": str(actor_id)},
+            )
+    except Exception as e:
+        print(f"notify_friend_accepted: FCM 푸시 실패 - {e}")
 
 
 # AI 여행 일정 생성 완료 시 알림 (앱을 꺼둔 사이 끝나도 알 수 있도록 FCM 푸시 포함).
