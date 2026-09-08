@@ -6,7 +6,7 @@ from app.schemas.chat_schema import ChatMessageCreate
 from typing import Dict, List, Optional
 from app.services import agent_service
 from app.core.database import AsyncSessionLocal
-from app.services.notification_service import send_chat_notification
+from app.services.notification_service import send_chat_notification, notify_bot_error
 import json 
 
 # 채팅방 생성
@@ -108,7 +108,8 @@ async def save_message(db: AsyncSession, room_id: int, sender_id: int, content: 
         sender_result = await db.execute(select(User).where(User.user_id == sender_id))
         sender = sender_result.scalar_one_or_none()
 
-        if sender:
+        # plan(일정 완성) 메시지는 notify_itinerary_ready가 별도 FCM을 쏘므로 여기선 제외 (중복 알림 방지)
+        if sender and message_type != "plan":
             await send_chat_notification(
                 db=db,
                 sender_nickname=sender.nickname,
@@ -305,6 +306,12 @@ async def generate_and_send_bot_reply(room_id: int, user_id: int, user_content: 
                         "type": "bot_error",
                         "content": "앗, 에이전트 처리 중 문제가 발생했어요. 다시 시도해 주세요!"
                     }, ensure_ascii=False))
+                    # 앱이 백그라운드/종료 상태여도 알 수 있도록 요청자에게 FCM 푸시 (스트림 db와 분리된 세션 사용)
+                    try:
+                        async with AsyncSessionLocal() as notify_db:
+                            await notify_bot_error(notify_db, user_id, room_id)
+                    except Exception as e:
+                        print(f"bot_error 알림 전송 실패: {e}")
                     
             except Exception as e:
                 print(f"챗봇 스트림 처리 중 에러: {e}")

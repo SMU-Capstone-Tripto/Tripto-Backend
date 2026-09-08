@@ -245,6 +245,42 @@ async def notify_itinerary_ready(
         print(f"notify_itinerary_ready: 멤버 FCM 푸시 실패 - {e}")
 
 
+# 에이전트 처리 중 에러가 나서 유저에게 즉시 알려야 할 때 (앱이 꺼져 있어도 폰에 뜨도록 FCM 포함).
+# bot_status 같은 단순 진행 알림은 여기로 오면 안 된다 — 알림 폭탄이 되므로 호출부에서 error 이벤트에만 연결한다.
+async def notify_bot_error(db: AsyncSession, user_id: int, room_id: Optional[int] = None):
+    body = "앗, 에이전트 처리 중 문제가 발생했어요. 다시 시도해 주세요!"
+
+    try:
+        await _create_notification(
+            db=db,
+            recipient_id=user_id,
+            actor_id=user_id,  # 시스템 알림이라 actor=본인
+            notif_type="bot_error",
+            content=body,
+        )
+        await db.commit()
+    except Exception as e:
+        print(f"notify_bot_error: DB 알림 실패 - {e}")
+
+    try:
+        token = (await db.execute(
+            select(User.fcm_token).where(
+                User.user_id == user_id,
+                User.fcm_token.isnot(None),
+                User.is_active == True,
+            )
+        )).scalar_one_or_none()
+        if token:
+            await send_push_notification(
+                token=token,
+                title="일정 생성 중 오류",
+                body=body,
+                data={"type": "bot_error", "room_id": str(room_id) if room_id is not None else ""},
+            )
+    except Exception as e:
+        print(f"notify_bot_error: FCM 푸시 실패 - {e}")
+
+
 # 투표가 동점으로 마감됐을 때 방장(생성자)에게 "직접 골라주세요" 알림 + FCM.
 async def notify_vote_tie(db: AsyncSession, vote_session):
     body = "여행 일정 투표가 동점으로 마감됐어요. 방장이 최종 일정을 선택해 주세요."
@@ -432,7 +468,9 @@ async def send_multicast_notification(
             tokens=tokens,
         )
 
-        response = fcm.send_multicast(message)
+        # send_multicast/send_all이 쓰던 FCM batch(/batch) 엔드포인트는 2024-06에 폐지됨.
+        # firebase-admin 6.5엔 메서드는 남아있지만 런타임에서 실패하므로 send_each_for_multicast 사용.
+        response = fcm.send_each_for_multicast(message)
         print(f"Successfully sent {response.success_count} messages out of {len(tokens)}")
 
         if response.failure_count > 0:
