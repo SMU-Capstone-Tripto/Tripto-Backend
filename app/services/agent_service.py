@@ -449,7 +449,9 @@ async def chat_stream(
             await queue.put({"type": "result", "payload": payload})
         except Exception as e:
             logger.exception("user_id=%s room_id=%s 일정 생성 실패", user_id, room_id)
-            await queue.put({"type": "error", "message": str(e)})
+            # fatal=True: 실제 처리 실패 → 채팅 경로에서 bot_error FCM을 쏜다.
+            # (아래 릴레이 타임아웃은 지연일 뿐 생성은 계속되므로 fatal 아님)
+            await queue.put({"type": "error", "message": str(e), "fatal": True})
         finally:
             await queue.put({"type": "eos"})
 
@@ -470,7 +472,10 @@ async def chat_stream(
         if item["type"] == "status":
             yield f"data: {json.dumps({'type': 'status', 'message': item['message']}, ensure_ascii=False)}\n\n"
         elif item["type"] == "error":
-            yield f"data: {json.dumps({'type': 'error', 'message': item['message']}, ensure_ascii=False)}\n\n"
+            err = {'type': 'error', 'message': item['message']}
+            if item.get('fatal'):
+                err['fatal'] = True
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
             break
         elif item["type"] == "result":
             yield f"data: {json.dumps(item['payload'], ensure_ascii=False)}\n\n"
