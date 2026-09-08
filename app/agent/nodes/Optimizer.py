@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import List
 from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
 from _naver_api import search_route, geocode, poi_kind as _poi_kind, is_franchise as _is_franchise
@@ -173,7 +173,7 @@ def _select_accommodation(
 
 
 class DaySchedule(BaseModel):
-    """일자별 LLM 호출 1건의 출력. 프롬프트를 하루 단위로 쪼개 토큰당 한도(TPM) 초과를 방지한다."""
+    """일자별 LLM 호출 1건의 출력. 하루 단위로 쪼개 프롬프트를 작게 유지하고, 일자별 호출을 병렬로 던진다."""
     schedule: List[str]  # ["09:00 활동 (장소명)", "장소A → 장소B (수단·시간·요금)", ...]
 
 
@@ -1224,29 +1224,31 @@ def Optimizer(state: TravelState) -> dict:
                         5. 교통편·체크인/체크아웃은 Python이 자동 처리하므로 schedule에 추가하지 말 것.
                     """
 
-    llm = ChatGroq(
-        model="openai/gpt-oss-20b",
-        api_key=os.getenv("GROQ_API_KEY"),
+    # 일정 생성만 OpenAI GPT-5.6 Luna로 교체. gpt-oss-20b는 tool call을 자주 빼먹어
+    # (아래 _MAX_ATTEMPTS 재시도 로직 참고) 이 노드에서 실패율이 높았다. 나머지 노드
+    # (Intent_Analyzer / Spot_Enhancer / Revision_Manager)는 단순 분류·추출이라 Groq
+    # 무료 티어를 그대로 쓴다 — 이 노드만 유료 API로 분리.
+    #
+    # Luna는 답을 내기 전 reasoning 토큰을 먼저 소모하는 추론 모델이고 기본 effort가
+    # medium이라, reasoning 토큰이 출력 비용의 대부분을 차지한다. low로 고정해 비용과
+    # max_tokens 소모를 함께 줄인다. (max_tokens=4000 → max_completion_tokens로 매핑됨)
+    llm = ChatOpenAI(
+        model="gpt-5.6-luna",
+        api_key=os.getenv("OPENAI"),
         timeout=30,
         max_tokens=4000,
-        # gpt-oss는 답을 내기 전 내부적으로 reasoning 토큰을 먼저 소모하는 추론 모델이라,
-        # effort가 기본값이면 reasoning만 하다 max_tokens를 다 써버려 정작 도구 호출을 못 하고
-        # 실패하는 경우가 실측으로 확인됨. low로 낮춰 reasoning 토큰을 줄인다.
         reasoning_effort="low",
     )
 
-    # 일자별로 LLM을 나눠 호출한다 — 3일치를 한 번에 요청하면 프롬프트+응답 합계가
-    # Groq 무료티어 TPM(분당 토큰) 한도를 넘어 요청 자체가 거부되거나 응답이 중간에 잘렸다.
-    # 하루씩 쪼개면 호출당 토큰량이 작아져 한도 안에 안전하게 들어온다.
+    # 일자별로 LLM을 나눠 호출한다 — 하루 단위로 쪼개면 프롬프트·응답이 작아 모델이
+    # 장소를 빠뜨릴 여지가 줄고, 각 호출이 완전히 독립적이라 병렬로 던질 수 있다.
+    # (예전엔 Groq 무료티어 TPM 한도 회피 목적도 있었으나 OpenAI로 옮긴 뒤로는 무관)
     day_skeletons = skeletons.split("\n\n")
     plan_title = f"{city} 여행"
-    daily_schedules: list[list[str]] = []
-    generation_failed = False
 
-    for d in range(num_days):
+    def _build_day_messages(d: int):
         is_first = d == 0
         day_skel = day_skeletons[d] if d < len(day_skeletons) else ""
-
         day_prompt = f"""
                         너는 여행 일정 최적화 전문가야. 아래 **스켈레톤**을 기반으로 {d + 1}일차({date_labels[d]}) 하루치 일정만 완성해줘.
                         스켈레톤의 장소 순서와 이동 정보는 이미 최적화되어 있으니 그대로 사용할 것.
@@ -1262,31 +1264,37 @@ def Optimizer(state: TravelState) -> dict:
                         {shared_rules}
                         {"6. title: 여행지와 테마가 담긴 매력적인 한국어 제목도 함께 작성." if is_first else ""}
                     """
-
         schema = FirstDaySchedule if is_first else DaySchedule
-        messages = [
+        return schema, [
             SystemMessage(content=day_prompt),
             HumanMessage(content=f"{d + 1}일차 일정을 스켈레톤 기반으로 완성해줘."),
         ]
 
-        # gpt-oss-20b가 이따금 tool call 자체를 빼먹는 경우가 있어 여러 번 재시도
-        _MAX_ATTEMPTS = 3
-        day_result = None
+    # 모델이 이따금 tool call 자체를 빼먹어 구조화 출력이 실패하는 경우가 있어 일자별로 재시도
+    _MAX_ATTEMPTS = 3
+
+    def _run_day(d: int):
+        schema, messages = _build_day_messages(d)
         for attempt in range(_MAX_ATTEMPTS):
             try:
-                day_result = llm.with_structured_output(schema).invoke(messages)
-                break
+                return llm.with_structured_output(schema).invoke(messages)
             except Exception:
                 if attempt == _MAX_ATTEMPTS - 1:
-                    generation_failed = True
-                continue
+                    return None
+        return None
 
-        if generation_failed:
-            break
+    # 각 일자 호출은 서로 의존이 없어 병렬로 실행한다 — 순차 대비 (일수-1)회의
+    # 왕복 지연이 사라져 3일 여행이 ~3배 빠르게 완성된다.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(num_days, 8)) as ex:
+        day_results = list(ex.map(_run_day, range(num_days)))
 
-        daily_schedules.append(list(day_result.schedule))
-        if is_first:
-            plan_title = day_result.title
+    generation_failed = any(r is None for r in day_results)
+    daily_schedules: list[list[str]] = [
+        list(r.schedule) for r in day_results if r is not None
+    ]
+    if day_results and day_results[0] is not None:
+        plan_title = getattr(day_results[0], "title", plan_title)
 
     if generation_failed:
         return {
