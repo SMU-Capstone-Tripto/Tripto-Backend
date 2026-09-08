@@ -306,12 +306,14 @@ async def generate_and_send_bot_reply(room_id: int, user_id: int, user_content: 
                         "type": "bot_error",
                         "content": "앗, 에이전트 처리 중 문제가 발생했어요. 다시 시도해 주세요!"
                     }, ensure_ascii=False))
-                    # 앱이 백그라운드/종료 상태여도 알 수 있도록 요청자에게 FCM 푸시 (스트림 db와 분리된 세션 사용)
-                    try:
-                        async with AsyncSessionLocal() as notify_db:
-                            await notify_bot_error(notify_db, user_id, room_id)
-                    except Exception as e:
-                        print(f"bot_error 알림 전송 실패: {e}")
+                    # fatal(실제 처리 실패)일 때만 FCM. 단순 응답 지연(생성은 계속 진행)엔 안 보냄 —
+                    # 그 경우 완료되면 notify_itinerary_ready가 별도로 알림.
+                    if data.get("fatal"):
+                        try:
+                            async with AsyncSessionLocal() as notify_db:
+                                await notify_bot_error(notify_db, user_id, room_id)
+                        except Exception as e:
+                            print(f"bot_error 알림 전송 실패: {e}")
                     
             except Exception as e:
                 print(f"챗봇 스트림 처리 중 에러: {e}")
