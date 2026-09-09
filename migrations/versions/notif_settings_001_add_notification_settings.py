@@ -1,7 +1,7 @@
 """add notification settings columns to users (push_enabled, notif_enabled)
 
 Revision ID: notif_settings_001
-Revises: fcm_token_001
+Revises: a3c4d5e6f7b8
 Create Date: 2026-09-09
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'notif_settings_001'
-down_revision = 'fcm_token_001'
+down_revision = 'a3c4d5e6f7b8'
 branch_labels = None
 depends_on = None
 
