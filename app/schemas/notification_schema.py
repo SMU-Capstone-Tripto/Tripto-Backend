@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
+from typing import Optional
 
 
 class NotificationResponse(BaseModel):
@@ -26,3 +27,13 @@ class NotificationResponse(BaseModel):
             is_read=notification.is_read,
             created_at=notification.created_at,
         )
+
+
+class NotificationSettingsUpdate(BaseModel):
+    push_enabled: Optional[bool] = None
+    notif_enabled: Optional[bool] = None
+
+
+class NotificationSettingsResponse(BaseModel):
+    push_enabled: bool
+    notif_enabled: bool

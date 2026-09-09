@@ -46,13 +46,20 @@ manager = NotificationManager()
 
 
 # DB에 알림을 저장하고 WebSocket으로 실시간 push하는 내부 공통 함수
+# notif_enabled가 False면 앱 내 알림(DB + WebSocket)을 스킵한다
 async def _create_notification(
     db: AsyncSession,
     recipient_id: int,
     actor_id: int,
     notif_type: NotificationType,
     content: str,
-) -> Notification:
+) -> Notification | None:
+    user_result = await db.execute(
+        select(User.notif_enabled).where(User.user_id == recipient_id)
+    )
+    if user_result.scalar_one_or_none() is False:
+        return None
+
     notification = Notification(
         recipient_id=recipient_id,
         actor_id=actor_id,
@@ -99,6 +106,7 @@ async def notify_friend_request(db: AsyncSession, recipient_id: int, actor_id: i
                 User.user_id == recipient_id,
                 User.fcm_token.isnot(None),
                 User.is_active == True,
+                User.push_enabled == True,
             )
         )
         token = result.scalar_one_or_none()
@@ -133,6 +141,7 @@ async def notify_friend_accepted(db: AsyncSession, recipient_id: int, actor_id: 
                 User.user_id == recipient_id,
                 User.fcm_token.isnot(None),
                 User.is_active == True,
+                User.push_enabled == True,
             )
         )
         token = result.scalar_one_or_none()
@@ -178,6 +187,7 @@ async def notify_itinerary_ready(
                 User.user_id == user_id,
                 User.fcm_token.isnot(None),
                 User.is_active == True,
+                User.push_enabled == True,
             )
         )
         token = result.scalar_one_or_none()
@@ -231,6 +241,7 @@ async def notify_itinerary_ready(
                     User.user_id.in_(member_ids),
                     User.fcm_token.isnot(None),
                     User.is_active == True,
+                    User.push_enabled == True,
                 )
             )).scalars().all() if t
         ]
@@ -268,6 +279,7 @@ async def notify_bot_error(db: AsyncSession, user_id: int, room_id: Optional[int
                 User.user_id == user_id,
                 User.fcm_token.isnot(None),
                 User.is_active == True,
+                User.push_enabled == True,
             )
         )).scalar_one_or_none()
         if token:
@@ -302,6 +314,7 @@ async def notify_vote_tie(db: AsyncSession, vote_session):
                 User.user_id == vote_session.creator_id,
                 User.fcm_token.isnot(None),
                 User.is_active == True,
+                User.push_enabled == True,
             )
         )).scalar_one_or_none()
         if token:
@@ -352,6 +365,7 @@ async def notify_vote_finalized(db: AsyncSession, vote_session, travel=None):
                 User.user_id.in_(recipients),
                 User.fcm_token.isnot(None),
                 User.is_active == True,
+                User.push_enabled == True,
             )
         )
         tokens = [t for t in tokens_result.scalars().all() if t]
@@ -507,6 +521,7 @@ async def send_chat_notification(
         .where(User.user_id.in_(recipient_user_ids))
         .where(User.fcm_token.isnot(None))
         .where(User.is_active == True)
+        .where(User.push_enabled == True)
     )
 
     tokens = [row[0] for row in result.all() if row[0]]

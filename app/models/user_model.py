@@ -54,6 +54,8 @@ class User(Base):
     profile_image = Column(String(512), nullable=True)
     avatar_color = Column(String(7), nullable=True)
     fcm_token = Column(String(255), nullable=True)
+    push_enabled = Column(Boolean, default=True, nullable=False, server_default='1')
+    notif_enabled = Column(Boolean, default=True, nullable=False, server_default='1')
     # 관계
     sent_friend_requests = relationship(
         "Friendship",
