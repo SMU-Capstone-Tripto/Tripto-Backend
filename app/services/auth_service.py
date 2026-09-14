@@ -171,6 +171,7 @@ async def kakao_login(code: str, db: AsyncSession) -> dict:
         "access_token": create_access_token(token_data),
         "refresh_token": create_refresh_token(token_data),
         "token_type": "bearer",
+        "email": user.email,
     }
 
 
@@ -213,6 +214,7 @@ async def google_login(code: str, db: AsyncSession) -> dict:
         "access_token": create_access_token(token_data),
         "refresh_token": create_refresh_token(token_data),
         "token_type": "bearer",
+        "email": user.email,
     }
 
 # 비밀번호 변경(로그인 환경)
