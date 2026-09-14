@@ -8,7 +8,11 @@ from app.core.database import get_async_db, AsyncSessionLocal
 from app.core.dependencies import get_current_user
 from app.core.security import verify_access_token
 from app.models.user_model import User
-from app.schemas.notification_schema import NotificationResponse
+from app.schemas.notification_schema import (
+    NotificationResponse,
+    NotificationSettingsUpdate,
+    NotificationSettingsResponse,
+)
 from app.services import notification_service
 
 router = APIRouter(prefix="/notifications", tags=["알림"])
@@ -41,6 +45,34 @@ async def mark_all_notifications_read(
 ):
     await notification_service.mark_all_as_read(db, current_user.user_id)
     return {"message": "모든 알림이 읽음 처리되었습니다."}
+
+
+@router.get("/settings", response_model=NotificationSettingsResponse, summary="알림 설정 조회")
+async def get_notification_settings(
+    current_user: User = Depends(get_current_user),
+):
+    return NotificationSettingsResponse(
+        push_enabled=current_user.push_enabled,
+        notif_enabled=current_user.notif_enabled,
+    )
+
+
+@router.patch("/settings", response_model=NotificationSettingsResponse, summary="알림 설정 변경")
+async def update_notification_settings(
+    body: NotificationSettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    if body.push_enabled is not None:
+        current_user.push_enabled = body.push_enabled
+    if body.notif_enabled is not None:
+        current_user.notif_enabled = body.notif_enabled
+    await db.flush()
+    await db.refresh(current_user)
+    return NotificationSettingsResponse(
+        push_enabled=current_user.push_enabled,
+        notif_enabled=current_user.notif_enabled,
+    )
 
 
 @router.websocket("/ws")

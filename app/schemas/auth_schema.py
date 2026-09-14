@@ -82,11 +82,13 @@ class UserResponse(BaseModel):
     auth_provider: AuthProvider
     email: str
     tags: List[str]
-    social_id: Optional[str] = None  
+    social_id: Optional[str] = None
     is_active: bool
     is_email_verified: bool
     profile_image: Optional[str] = None
     created_at: datetime
+    push_enabled: bool = True
+    notif_enabled: bool = True
 
     model_config = {"from_attributes": True}
 
