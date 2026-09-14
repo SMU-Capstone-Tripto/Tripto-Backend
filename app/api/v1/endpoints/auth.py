@@ -1,5 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import RedirectResponse
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as aioredis
 from datetime import timedelta
@@ -45,6 +47,33 @@ from app.services.email_service import (
 from fastapi.security import HTTPAuthorizationCredentials
 
 router = APIRouter(prefix="/auth", tags=["인증"])
+
+
+def _oauth_popup_response(tokens: dict) -> HTMLResponse:
+    """웹 팝업 로그인용 응답: 토큰을 화면에 그대로 노출하지 않고
+    opener 창으로 postMessage 전달 후 팝업을 닫는다."""
+    payload = json.dumps(
+        {
+            "source": "tripto-auth",
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"],
+            "email": tokens.get("email"),
+        }
+    )
+    target_origin = json.dumps(settings.FRONTEND_URL)
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script>
+  if (window.opener) {{
+    window.opener.postMessage({payload}, {target_origin});
+  }}
+  window.close();
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 # ── 이메일 인증 코드 발송 ─────────────────────────────────
@@ -158,24 +187,32 @@ async def update_me(
 
 # ── 카카오 OAuth ──────────────────────────────────────────
 @router.get("/kakao/login", summary="카카오 로그인 시작")
-async def kakao_oauth_start():
+async def kakao_oauth_start(platform: str | None = Query(default=None)):
     url = (
         f"https://kauth.kakao.com/oauth/authorize"
         f"?client_id={settings.KAKAO_CLIENT_ID}"
         f"&redirect_uri={settings.KAKAO_REDIRECT_URI}"
         f"&response_type=code"
     )
+    if platform:
+        url += f"&state={platform}"
     return RedirectResponse(url)
 
-@router.get("/kakao/callback", response_model=TokenResponse, summary="카카오 OAuth 콜백")
-async def kakao_callback(code: str, db: AsyncSession = Depends(get_async_db)):
+@router.get("/kakao/callback", summary="카카오 OAuth 콜백")
+async def kakao_callback(
+    code: str,
+    state: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_async_db),
+):
     tokens = await kakao_login(code, db)
+    if state == "web":
+        return _oauth_popup_response(tokens)
     return TokenResponse(**tokens)
 
 
 # ── 구글 OAuth ────────────────────────────────────────────
 @router.get("/google/login", summary="구글 로그인 시작")
-async def google_oauth_start():
+async def google_oauth_start(platform: str | None = Query(default=None)):
     scope = "openid email profile"
     url = (
         f"https://accounts.google.com/o/oauth2/v2/auth"
@@ -184,11 +221,19 @@ async def google_oauth_start():
         f"&response_type=code"
         f"&scope={scope}"
     )
+    if platform:
+        url += f"&state={platform}"
     return RedirectResponse(url)
 
-@router.get("/google/callback", response_model=TokenResponse, summary="구글 OAuth 콜백")
-async def google_callback(code: str, db: AsyncSession = Depends(get_async_db)):
+@router.get("/google/callback", summary="구글 OAuth 콜백")
+async def google_callback(
+    code: str,
+    state: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_async_db),
+):
     tokens = await google_login(code, db)
+    if state == "web":
+        return _oauth_popup_response(tokens)
     return TokenResponse(**tokens)
 
 
